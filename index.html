@@ -1061,6 +1061,7 @@ let CLIENTS = [];
 let INVOICES = [];
 let ALLOCATIONS = [];
 let VOUCHERS = [];
+let RECEIPTS = [];
 let SETTINGS = {};
 
 // ══════════════════════════════════════════════════
@@ -2212,6 +2213,7 @@ async function loadReceipts() {
   const tbody = document.getElementById('receipt-tbody');
   if (!res.ok) return;
   const rows = res.data;
+  RECEIPTS = rows; // cache globally for edit/delete lookups
   if (!rows.length) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--text3)">No receipts yet.</td></tr>'; return; }
   tbody.innerHTML = rows.slice().reverse().map(r => {
     const acct = r.payment_account === 'drawings'
@@ -2227,7 +2229,10 @@ async function loadReceipts() {
       <td style="font-family:'DM Mono',monospace;font-weight:600;color:var(--green)">RM ${parseFloat(r.amount||0).toLocaleString('en-MY',{minimumFractionDigits:2})}</td>
       <td>${acct}</td>
       <td style="font-size:12px;color:var(--text2)">${r.notes||'—'}</td>
-      <td><button class="btn btn-ghost btn-sm" onclick='openReceiptEdit(${JSON.stringify(r)})'>Edit</button></td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-ghost btn-sm" onclick="openReceiptEditById('${(r.receipt_id||r.id||'').toString().replace(/'/g,'')}')">Edit</button>
+        <button class="btn btn-ghost btn-sm" style="color:var(--red);margin-left:4px" onclick="deleteReceipt('${(r.receipt_id||r.id||'').toString().replace(/'/g,'')}','${(r.inv_no||'').replace(/'/g,'')}')">Del</button>
+      </td>
     </tr>`;
   }).join('');
 }
@@ -2419,7 +2424,10 @@ async function loadVouchers() {
       <td style="font-family:'DM Mono',monospace;font-weight:600;color:var(--red)">RM ${parseFloat(v.amount||0).toLocaleString('en-MY',{minimumFractionDigits:2})}</td>
       <td>${acct}</td>
       <td style="font-size:12px;color:var(--text2)">${v.description||'—'}</td>
-      <td><button class="btn btn-ghost btn-sm" onclick='openVoucherEdit(${JSON.stringify(v)})'>Edit</button></td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-ghost btn-sm" onclick="openVoucherEditById('${(v.voucher_id||v.id||'').toString().replace(/'/g,'')}')">Edit</button>
+        <button class="btn btn-ghost btn-sm" style="color:var(--red);margin-left:4px" onclick="deleteVoucher('${(v.voucher_id||v.id||'').toString().replace(/'/g,'')}','${(v.voucher_no||'').replace(/'/g,'')}')">Del</button>
+      </td>
     </tr>`;
   }).join('');
 }
@@ -2526,6 +2534,44 @@ function openVoucherEdit(v) {
     document.getElementById('pv-sel-count').textContent = v.ref_inv_id ? `— editing: ${v.inv_no||v.ref_inv_id}` : '— none selected';
   }
   if (v.category) document.getElementById('pv-category').value = v.category;
+}
+
+function openVoucherEditById(id) {
+  const v = VOUCHERS.find(x => (x.voucher_id||x.id||'').toString() === id.toString());
+  if (!v) { toast('Voucher not found — please reload the page.', 'error'); return; }
+  openVoucherEdit(v);
+}
+
+async function deleteVoucher(id, label) {
+  const confirm = window.confirm(`Delete voucher ${label||id}? This cannot be undone.`);
+  if (!confirm) return;
+  const res = await api({ action: 'delete_voucher', data: { voucher_id: id } });
+  if (res.ok) {
+    toast('Voucher deleted.', 'success');
+    VOUCHERS = [];
+    loadVouchers();
+  } else {
+    toast(res.error || 'Delete failed.', 'error');
+  }
+}
+
+function openReceiptEditById(id) {
+  const r = RECEIPTS.find(x => (x.receipt_id||x.id||'').toString() === id.toString());
+  if (!r) { toast('Receipt not found — please reload the page.', 'error'); return; }
+  openReceiptEdit(r);
+}
+
+async function deleteReceipt(id, inv_no) {
+  const confirm = window.confirm(`Delete receipt for ${inv_no||id}? This cannot be undone.`);
+  if (!confirm) return;
+  const res = await api({ action: 'delete_receipt', data: { receipt_id: id } });
+  if (res.ok) {
+    toast('Receipt deleted.', 'success');
+    loadReceipts();
+    loadDashboard(); // refresh outstanding amounts
+  } else {
+    toast(res.error || 'Delete failed.', 'error');
+  }
 }
 
 function onPayeeChange() {
@@ -2840,7 +2886,7 @@ function renderGLRows(rows) {
   tbody.innerHTML = sorted.map(g => {
     const isJournal = g.source_type === 'journal';
     const editBtn   = isJournal
-      ? `<button class="btn btn-ghost btn-sm" onclick='openGLEdit(${JSON.stringify(g)})'>Edit</button>`
+      ? `<button class="btn btn-ghost btn-sm" onclick="openGLEditById('${(g.gl_id||g.id||'').toString().replace(/'/g,'')}')">Edit</button>`
       : `<span style="font-size:10px;color:var(--text3)">${g.source_type||''}</span>`;
     return `
     <tr>
@@ -2853,6 +2899,12 @@ function renderGLRows(rows) {
       <td>${editBtn}</td>
     </tr>`;
   }).join('');
+}
+
+function openGLEditById(id) {
+  const g = GL_ALL_ROWS.find(x => (x.gl_id||x.id||'').toString() === id.toString());
+  if (!g) { toast('GL entry not found — please reload the page.', 'error'); return; }
+  openGLEdit(g);
 }
 
 function openGLEdit(g) {
