@@ -1198,8 +1198,8 @@ async function loadDashboard() {
   const d = summaryRes.data;
   const fmt = n => 'RM ' + parseFloat(n || 0).toLocaleString('en-MY', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-  // ── Build paid-amount map from receipts (inv_no → total received) ──
-  const receipts = rcRes.ok ? rcRes.data : [];
+  // ── Build paid-amount map from receipts (inv_no → total received), excluding voided ──
+  const receipts = (rcRes.ok ? rcRes.data : []).filter(r => !(r.notes||'').startsWith('__VOID__'));
   const paidMap = {};  // inv_no → total paid
   receipts.forEach(r => {
     if (r.inv_no) paidMap[r.inv_no] = r2((paidMap[r.inv_no] || 0) + parseFloat(r.amount || 0));
@@ -1911,7 +1911,7 @@ async function loadPayout() {
   // Ensure vouchers are loaded for recon
   if (!VOUCHERS.length) {
     const vRes = await api({ action: 'get_vouchers' });
-    if (vRes.ok) VOUCHERS = vRes.data || [];
+    if (vRes.ok) VOUCHERS = (vRes.data || []).filter(v => !(v.description||'').startsWith('__VOID__'));
   }
   // Populate month filter options from ALLOCATIONS invoice dates
   const monthSel = document.getElementById('payout-filter-month');
@@ -2212,8 +2212,8 @@ async function loadReceipts() {
   const res = await api({ action: 'get_receipts' });
   const tbody = document.getElementById('receipt-tbody');
   if (!res.ok) return;
-  const rows = res.data;
-  RECEIPTS = rows; // cache globally for edit/delete lookups
+  RECEIPTS = (res.data || []).filter(r => !(r.notes||'').startsWith('__VOID__')); // cache, excluding voided
+  const rows = RECEIPTS;
   if (!rows.length) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--text3)">No receipts yet.</td></tr>'; return; }
   tbody.innerHTML = rows.slice().reverse().map(r => {
     const acct = r.payment_account === 'drawings'
@@ -2407,8 +2407,8 @@ async function loadVouchers() {
   const res = await api({ action: 'get_vouchers' });
   const tbody = document.getElementById('voucher-tbody');
   if (!res.ok) return;
-  VOUCHERS = res.data || [];            // cache globally for payout recon
-  const rows = res.data;
+  VOUCHERS = (res.data || []).filter(v => !(v.description||'').startsWith('__VOID__')); // cache, excluding voided
+  const rows = VOUCHERS;
   if (!rows.length) { tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--text3)">No payment vouchers yet.</td></tr>'; return; }
   tbody.innerHTML = rows.slice().reverse().map(v => {
     const acct = v.payment_account === 'drawings'
@@ -2543,9 +2543,25 @@ function openVoucherEditById(id) {
 }
 
 async function deleteVoucher(id, label) {
-  const confirm = window.confirm(`Delete voucher ${label||id}? This cannot be undone.`);
-  if (!confirm) return;
-  const res = await api({ action: 'delete_voucher', data: { voucher_id: id } });
+  const ok = window.confirm(`Delete voucher ${label||id}? This cannot be undone.`);
+  if (!ok) return;
+  // Backend has no delete endpoint — overwrite with a void marker so it is filtered out on load
+  const v = VOUCHERS.find(x => (x.voucher_id||x.id||'').toString() === id.toString());
+  if (!v) { toast('Voucher not found — please reload.', 'error'); return; }
+  const data = {
+    voucher_id:      id,
+    date:            v.date,
+    payee:           v.payee,
+    payee_nominee:   v.payee_nominee || v.payee,
+    amount:          0,
+    category:        v.category || '',
+    description:     '__VOID__' + (v.description || ''),
+    ref_inv_id:      v.ref_inv_id || '',
+    ref_inv_nos:     v.ref_inv_nos || '',
+    payment_account: v.payment_account || 'bank',
+    bank_account:    v.bank_account || 'CIMB 8606183963',
+  };
+  const res = await api({ action: 'save_voucher', data });
   if (res.ok) {
     toast('Voucher deleted.', 'success');
     VOUCHERS = [];
@@ -2562,13 +2578,27 @@ function openReceiptEditById(id) {
 }
 
 async function deleteReceipt(id, inv_no) {
-  const confirm = window.confirm(`Delete receipt for ${inv_no||id}? This cannot be undone.`);
-  if (!confirm) return;
-  const res = await api({ action: 'delete_receipt', data: { receipt_id: id } });
+  const ok = window.confirm(`Delete receipt for ${inv_no||id}? This cannot be undone.`);
+  if (!ok) return;
+  // Backend has no delete endpoint — overwrite with amount 0 and void marker so it is filtered out on load
+  const r = RECEIPTS.find(x => (x.receipt_id||x.id||'').toString() === id.toString());
+  if (!r) { toast('Receipt not found — please reload.', 'error'); return; }
+  const data = {
+    receipt_id:      id,
+    date:            r.date,
+    amount:          0,
+    notes:           '__VOID__' + (r.notes || ''),
+    payment_account: r.payment_account || 'bank',
+    bank_account:    r.bank_account || 'CIMB 8606183963',
+    inv_id:          r.inv_id || '',
+    inv_no:          r.inv_no || '',
+    client_name:     r.client_name || '',
+  };
+  const res = await api({ action: 'save_receipt', data });
   if (res.ok) {
     toast('Receipt deleted.', 'success');
     loadReceipts();
-    loadDashboard(); // refresh outstanding amounts
+    loadDashboard();
   } else {
     toast(res.error || 'Delete failed.', 'error');
   }
@@ -2967,7 +2997,7 @@ async function loadIncomeStatement() {
 
   const filterYear = y => !year || (y||'').startsWith(year);
   const invoices = invRes.data.filter(i => i.status !== 'cancelled' && filterYear(i.inv_date||i.date||''));
-  const vouchers = vRes.data.filter(v => filterYear(v.date||''));
+  const vouchers = vRes.data.filter(v => filterYear(v.date||'') && !(v.description||'').startsWith('__VOID__'));
 
   const revenue  = invoices.reduce((s,i) => s + parseFloat(i.amount||0) + parseFloat(i.disb_amount||0), 0);
   const totalExp = vouchers.reduce((s,v) => s + parseFloat(v.amount||0), 0);
@@ -3025,8 +3055,8 @@ async function loadBalanceSheet() {
   if (!invRes.ok) return;
 
   const invoices  = invRes.data.filter(i => i.status !== 'cancelled');
-  const receipts  = rcRes.ok ? rcRes.data : [];
-  const vouchers  = vRes.ok  ? vRes.data  : [];
+  const receipts  = (rcRes.ok ? rcRes.data : []).filter(r => !(r.notes||'').startsWith('__VOID__'));
+  const vouchers  = (vRes.ok  ? vRes.data  : []).filter(v => !(v.description||'').startsWith('__VOID__'));
   const glEntries = glRes.ok ? glRes.data : [];
 
   // ── Opening balances (per Excel GL 1/1/2026) ──
@@ -3228,9 +3258,9 @@ async function loadAging() {
   const fmt   = n => 'RM ' + n.toLocaleString('en-MY',{minimumFractionDigits:2});
   const buckets = {current:0, d30:0, d60:0, d90:0, d120:0, d365:0};
 
-  // Build paid map from receipts
+  // Build paid map from receipts (excluding voided)
   const rcPaidMap = {};
-  if (rcRes.ok) rcRes.data.forEach(r => {
+  if (rcRes.ok) rcRes.data.filter(r => !(r.notes||'').startsWith('__VOID__')).forEach(r => {
     if (r.inv_no) rcPaidMap[r.inv_no] = r2((rcPaidMap[r.inv_no]||0) + parseFloat(r.amount||0));
   });
 
