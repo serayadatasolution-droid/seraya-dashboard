@@ -297,7 +297,7 @@
   <div class="sidebar">
     <div class="sidebar-logo">
       <div class="sidebar-logo-name">Seraya Data Solution</div>
-      <div class="sidebar-logo-reg">JM1027134-P</div>
+      <div class="sidebar-logo-reg">JM1027134-P · v26.04.26</div>
     </div>
     <nav class="sidebar-nav">
       <div class="nav-section">Overview</div>
@@ -3255,73 +3255,75 @@ async function loadSalesAnalysis() {
 
 // ══ DEBTOR AGING ══
 async function loadAging() {
-  try {
-    const today = new Date();
-    const fmt   = n => 'RM ' + parseFloat(n||0).toLocaleString('en-MY',{minimumFractionDigits:2});
-    const buckets = {current:0, d30:0, d60:0, d90:0, d120:0, d365:0};
+  const tbody = document.getElementById('ag-tbody');
+  tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--text3)">Loading…</td></tr>';
 
-    // Use RECEIPTS global if already loaded, else fetch fresh
-    let rcData = RECEIPTS.length ? RECEIPTS : [];
-    if (!rcData.length) {
-      const rcRes = await api({action:'get_receipts'});
-      rcData = (rcRes.ok ? rcRes.data || [] : []).filter(r =>
-        !isDeleted('receipts',(r.receipt_id||r.id||'').toString()) &&
-        !(r.notes||'').startsWith('__VOID__')
-      );
-    }
+  const today = new Date();
+  const fmt   = n => 'RM ' + parseFloat(n||0).toLocaleString('en-MY',{minimumFractionDigits:2});
+  const buckets = {current:0, d30:0, d60:0, d90:0, d120:0, d365:0};
 
-    // Build paid map from receipts
-    const rcPaidMap = {};
-    rcData.forEach(r => {
+  // Always fetch fresh — avoids stale cache issues
+  const [invRes, rcRes] = await Promise.all([
+    api({action:'get_invoices'}),
+    api({action:'get_receipts'}),
+  ]);
+
+  if (!invRes.ok) {
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--red)">Failed to load invoices: ${invRes.error||'unknown error'}</td></tr>`;
+    return;
+  }
+
+  // Build paid map (exclude deleted/voided receipts)
+  const rcPaidMap = {};
+  (rcRes.ok ? rcRes.data || [] : [])
+    .filter(r => !isDeleted('receipts',(r.receipt_id||r.id||'').toString()) && !(r.notes||'').startsWith('__VOID__'))
+    .forEach(r => {
       if (r.inv_no) rcPaidMap[r.inv_no] = r2((rcPaidMap[r.inv_no]||0) + parseFloat(r.amount||0));
     });
 
-    // Use global INVOICES if loaded, else fetch
-    let allInvoices = INVOICES.length ? INVOICES : [];
-    if (!allInvoices.length) {
-      const res = await api({action:'get_invoices'});
-      if (!res.ok) throw new Error(res.error || 'Failed to load invoices');
-      allInvoices = res.data || [];
-    }
+  const allInvoices  = invRes.data || [];
+  const outstanding  = allInvoices.filter(i => i.status === 'outstanding' || i.status === 'partial');
 
-    const outstanding = allInvoices.filter(i => i.status === 'outstanding' || i.status === 'partial');
-    const rows = outstanding.map(i => {
-      const idate = i.inv_date || i.date || '';
-      const days  = idate ? Math.floor((today - new Date(idate)) / 86400000) : 0;
-      const gross = parseFloat(i.amount||0) + parseFloat(i.disb_amount||0);
-      const amt   = r2(Math.max(0, gross - (rcPaidMap[i.inv_no]||0)));
-      let bucket, label, color;
-      if (days <= 30)       { bucket='current'; label='Current (0–30d)'; color='var(--green)'; }
-      else if (days <= 60)  { bucket='d30';     label='31–60 days';      color='var(--blue)'; }
-      else if (days <= 90)  { bucket='d60';     label='61–90 days';      color='var(--amber)'; }
-      else if (days <= 120) { bucket='d90';     label='91–120 days';     color='var(--red)'; }
-      else if (days <= 365) { bucket='d120';    label='121d–1 year';     color='var(--red)'; }
-      else                  { bucket='d365';    label='> 1 year';        color='#8b0000'; }
-      buckets[bucket] = r2(buckets[bucket] + amt);
-      return `<tr>
-        <td style="font-family:'DM Mono',monospace;font-size:12px">${i.inv_no}</td>
-        <td style="font-size:12px;color:var(--text2)">${formatDate(idate)}</td>
-        <td><strong>${i.client_name}</strong></td>
-        <td style="font-size:12px;color:var(--text2)">${i.billing_party||'—'}</td>
-        <td style="font-family:'DM Mono',monospace">${fmt(amt)}</td>
-        <td style="font-family:'DM Mono',monospace;font-weight:600;color:${color}">${days}d</td>
-        <td><span class="badge" style="background:${color}20;color:${color}">${label}</span></td>
-      </tr>`;
+  if (!outstanding.length) {
+    // Show diagnostic: total invoices vs outstanding so we can see what's happening
+    ['ag-current','ag-30','ag-60','ag-90','ag-120','ag-365'].forEach(id => {
+      document.getElementById(id).textContent = fmt(0);
     });
-
-    document.getElementById('ag-current').textContent = fmt(buckets.current);
-    document.getElementById('ag-30').textContent      = fmt(buckets.d30);
-    document.getElementById('ag-60').textContent      = fmt(buckets.d60);
-    document.getElementById('ag-90').textContent      = fmt(buckets.d90);
-    document.getElementById('ag-120').textContent     = fmt(buckets.d120);
-    document.getElementById('ag-365').textContent     = fmt(buckets.d365);
-    document.getElementById('ag-tbody').innerHTML = rows.length ? rows.join('') :
-      '<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text3)">No outstanding debtors.</td></tr>';
-
-  } catch(e) {
-    console.error('loadAging error:', e);
-    toast('Aging failed to load: ' + e.message, 'error');
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text3)">No outstanding debtors. (${allInvoices.length} invoices total)</td></tr>`;
+    return;
   }
+
+  const rows = outstanding.map(i => {
+    const idate = i.inv_date || i.date || '';
+    const days  = idate ? Math.floor((today - new Date(idate)) / 86400000) : 0;
+    const gross = parseFloat(i.amount||0) + parseFloat(i.disb_amount||0);
+    const amt   = r2(Math.max(0, gross - (rcPaidMap[i.inv_no]||0)));
+    let bucket, label, color;
+    if (days <= 30)       { bucket='current'; label='Current (0–30d)'; color='var(--green)'; }
+    else if (days <= 60)  { bucket='d30';     label='31–60 days';      color='var(--blue)'; }
+    else if (days <= 90)  { bucket='d60';     label='61–90 days';      color='var(--amber)'; }
+    else if (days <= 120) { bucket='d90';     label='91–120 days';     color='var(--red)'; }
+    else if (days <= 365) { bucket='d120';    label='121d–1 year';     color='var(--red)'; }
+    else                  { bucket='d365';    label='> 1 year';        color='#8b0000'; }
+    buckets[bucket] = r2(buckets[bucket] + amt);
+    return `<tr>
+      <td style="font-family:'DM Mono',monospace;font-size:12px">${i.inv_no}</td>
+      <td style="font-size:12px;color:var(--text2)">${formatDate(idate)}</td>
+      <td><strong>${i.client_name}</strong></td>
+      <td style="font-size:12px;color:var(--text2)">${i.billing_party||'—'}</td>
+      <td style="font-family:'DM Mono',monospace">${fmt(amt)}</td>
+      <td style="font-family:'DM Mono',monospace;font-weight:600;color:${color}">${days}d</td>
+      <td><span class="badge" style="background:${color}20;color:${color}">${label}</span></td>
+    </tr>`;
+  });
+
+  document.getElementById('ag-current').textContent = fmt(buckets.current);
+  document.getElementById('ag-30').textContent      = fmt(buckets.d30);
+  document.getElementById('ag-60').textContent      = fmt(buckets.d60);
+  document.getElementById('ag-90').textContent      = fmt(buckets.d90);
+  document.getElementById('ag-120').textContent     = fmt(buckets.d120);
+  document.getElementById('ag-365').textContent     = fmt(buckets.d365);
+  tbody.innerHTML = rows.join('');
 }
 
 // ══ RETENTION RECON ══
