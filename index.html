@@ -1189,14 +1189,36 @@ function getSetting(key, def) {
 // DASHBOARD
 // ══════════════════════════════════════════════════
 async function loadDashboard() {
-  const res = await api({ action: 'dashboard_summary' });
-  if (!res.ok) return;
-  const d = res.data;
+  const [summaryRes, rcRes] = await Promise.all([
+    api({ action: 'dashboard_summary' }),
+    api({ action: 'get_receipts' }),
+  ]);
+  if (!summaryRes.ok) return;
+  const d = summaryRes.data;
   const fmt = n => 'RM ' + parseFloat(n || 0).toLocaleString('en-MY', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  // ── Build paid-amount map from receipts (inv_no → total received) ──
+  const receipts = rcRes.ok ? rcRes.data : [];
+  const paidMap = {};  // inv_no → total paid
+  receipts.forEach(r => {
+    if (r.inv_no) paidMap[r.inv_no] = r2((paidMap[r.inv_no] || 0) + parseFloat(r.amount || 0));
+  });
+
+  // ── Helper: remaining balance for an invoice ──
+  const remaining = i => {
+    const gross = parseFloat(i.amount || 0) + parseFloat(i.disb_amount || 0);
+    const paid  = paidMap[i.inv_no] || 0;
+    return r2(Math.max(0, gross - paid));
+  };
+
+  // ── Recalculate outstanding from invoices + receipts (overrides server figure) ──
+  const outstandingInvs = INVOICES.filter(i => i.status === 'outstanding' || i.status === 'partial');
+  const correctedOutstanding = r2(outstandingInvs.reduce((s, i) => s + remaining(i), 0));
+
   document.getElementById('dm-billed').textContent     = fmt(d.total_billed);
   document.getElementById('dm-received').textContent   = fmt(d.total_received);
-  document.getElementById('dm-outstanding').textContent = fmt(d.outstanding_amt);
-  document.getElementById('dm-outstanding-count').textContent = d.outstanding_count + ' invoices';
+  document.getElementById('dm-outstanding').textContent = fmt(correctedOutstanding);
+  document.getElementById('dm-outstanding-count').textContent = outstandingInvs.length + ' invoices';
   document.getElementById('dm-bank').textContent       = fmt(d.bank_balance);
   document.getElementById('dm-month').textContent      = fmt(d.this_month_billed);
   document.getElementById('dm-month-count').textContent = d.this_month_count + ' invoices';
@@ -1212,13 +1234,17 @@ async function loadDashboard() {
       <td>${statusBadge(i.status)}</td>
     </tr>`).join('') : '<tr><td colspan="4" style="text-align:center;color:var(--text3);padding:20px">No invoices yet</td></tr>';
 
-  const outstanding = INVOICES.filter(i => i.status === 'outstanding' || i.status === 'partial').slice(0, 8);
-  document.getElementById('dash-outstanding').innerHTML = outstanding.length ? outstanding.map(i => `
+  const outstanding = outstandingInvs.slice(0, 8);
+  document.getElementById('dash-outstanding').innerHTML = outstanding.length ? outstanding.map(i => {
+    const bal = remaining(i);
+    const isPartial = i.status === 'partial' || (paidMap[i.inv_no] && paidMap[i.inv_no] > 0);
+    return `
     <tr>
       <td><span style="font-family:'DM Mono',monospace;font-size:12px">${i.inv_no}</span></td>
       <td>${i.client_name}</td>
-      <td>RM ${r2(parseFloat(i.amount||0) + parseFloat(i.disb_amount||0) - parseFloat(i.paid_amount||0)).toLocaleString('en-MY',{minimumFractionDigits:2})}${i.status==='partial'?'<span style="font-size:10px;color:var(--text3);margin-left:4px">(partial)</span>':''}</td>
-    </tr>`).join('') : '<tr><td colspan="3" style="text-align:center;color:var(--text3);padding:20px">All clear ✓</td></tr>';
+      <td>RM ${bal.toLocaleString('en-MY',{minimumFractionDigits:2})}${isPartial?'<span style="font-size:10px;color:var(--text3);margin-left:4px">(partial)</span>':''}</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="3" style="text-align:center;color:var(--text3);padding:20px">All clear ✓</td></tr>';
 }
 
 // ══════════════════════════════════════════════════
@@ -1739,7 +1765,7 @@ function renderAllocations(data) {
       <td style="font-family:'DM Mono',monospace;font-size:12px;color:var(--green)">RM ${parseFloat(a.reviewer_amt||0).toFixed(2)}${parseFloat(a.reviewer_top20||0)>0?' <span style="font-size:10px;color:var(--text3)">(+RM'+parseFloat(a.reviewer_top20).toFixed(2)+' top-up)</span>':''}</td>
       <td style="font-family:'DM Mono',monospace;font-size:12px;color:var(--amber)">RM ${parseFloat(a.kc_commission||0).toFixed(2)}</td>
       <td>${statusBadge}</td>
-      <td><button class="btn btn-ghost btn-sm" onclick="openAllocEditById('${(a.alloc_id||a.id||'').replace(/'/g,'')}')">Edit</button></td>
+      <td><button class="btn btn-ghost btn-sm" onclick="openAllocEditByInvNo('${(a.inv_no||'').replace(/'/g,'')}')">Edit</button></td>
     </tr>`;
   }).join('');
 }
@@ -1747,6 +1773,12 @@ function renderAllocations(data) {
 function openAllocEditById(id) {
   const a = ALLOCATIONS.find(x => (x.alloc_id||x.id||'') === id);
   if (!a) { toast('Allocation not found — please reload.', 'error'); return; }
+  openAllocEdit(a);
+}
+
+function openAllocEditByInvNo(inv_no) {
+  const a = ALLOCATIONS.find(x => (x.inv_no||'') === inv_no);
+  if (!a) { toast('Allocation not found — please reload the page.', 'error'); return; }
   openAllocEdit(a);
 }
 
@@ -3138,17 +3170,23 @@ async function loadSalesAnalysis() {
 
 // ══ DEBTOR AGING ══
 async function loadAging() {
-  const res = await api({action:'get_invoices'});
+  const [res, rcRes] = await Promise.all([api({action:'get_invoices'}), api({action:'get_receipts'})]);
   if (!res.ok) return;
   const today = new Date();
   const fmt   = n => 'RM ' + n.toLocaleString('en-MY',{minimumFractionDigits:2});
   const buckets = {current:0, d30:0, d60:0, d90:0, d120:0, d365:0};
 
+  // Build paid map from receipts
+  const rcPaidMap = {};
+  if (rcRes.ok) rcRes.data.forEach(r => {
+    if (r.inv_no) rcPaidMap[r.inv_no] = r2((rcPaidMap[r.inv_no]||0) + parseFloat(r.amount||0));
+  });
+
   const outstanding = res.data.filter(i => i.status === 'outstanding' || i.status === 'partial');
   const rows = outstanding.map(i => {
     const idate = i.inv_date || i.date || '';
     const days = idate ? Math.floor((today - new Date(idate)) / 86400000) : 0;
-    const amt  = parseFloat(i.amount||0) + parseFloat(i.disb_amount||0) - parseFloat(i.paid_amount||0);
+    const amt  = r2(Math.max(0, parseFloat(i.amount||0) + parseFloat(i.disb_amount||0) - (rcPaidMap[i.inv_no]||0)));
     let bucket, label, color;
     if (days <= 30)        { bucket='current'; label='Current (0–30d)';  color='var(--green)'; }
     else if (days <= 60)   { bucket='d30';     label='31–60 days';       color='var(--blue)'; }
