@@ -1217,7 +1217,7 @@ async function loadDashboard() {
     <tr>
       <td><span style="font-family:'DM Mono',monospace;font-size:12px">${i.inv_no}</span></td>
       <td>${i.client_name}</td>
-      <td>RM ${parseFloat(i.amount||0).toLocaleString('en-MY',{minimumFractionDigits:2})}</td>
+      <td>RM ${r2(parseFloat(i.amount||0) + parseFloat(i.disb_amount||0) - parseFloat(i.paid_amount||0)).toLocaleString('en-MY',{minimumFractionDigits:2})}${i.status==='partial'?'<span style="font-size:10px;color:var(--text3);margin-left:4px">(partial)</span>':''}</td>
     </tr>`).join('') : '<tr><td colspan="3" style="text-align:center;color:var(--text3);padding:20px">All clear ✓</td></tr>';
 }
 
@@ -1465,7 +1465,7 @@ function recalcAllocation() {
       ['— KC / Ho', 'RM ' + kcComm.toFixed(2), 'earn'],
       [preparer + ' (preparer 70%)', 'RM ' + prepAmt.toFixed(2), 'earn'],
       [reviewer + ' (reviewer 30%)', 'RM ' + revAmt.toFixed(2), 'earn'],
-      ['+ RM20 reviewer top-up at payout', '(added when paid)', ''],
+      ...(jobType === 'MBRS' ? [['+ RM20 reviewer top-up at payout', '(added when paid)', '']] : []),
     ];
   }
 
@@ -1555,7 +1555,7 @@ async function saveInvoice() {
     preparer_amt: prepAmt,
     reviewer_name: document.getElementById('inv-reviewer').value,
     reviewer_amt: revAmt,
-    reviewer_top20: jobType === 'Cosec_Retainer' || jobType === 'Cosec_Other' ? 0 : parseFloat(getSetting('abot_reviewer_top', 20)),
+    reviewer_top20: jobType === 'MBRS' ? parseFloat(getSetting('abot_reviewer_top', 20)) : 0,
   };
   await api({ action: 'save_allocation', data: allocData });
 
@@ -1739,9 +1739,15 @@ function renderAllocations(data) {
       <td style="font-family:'DM Mono',monospace;font-size:12px;color:var(--green)">RM ${parseFloat(a.reviewer_amt||0).toFixed(2)}${parseFloat(a.reviewer_top20||0)>0?' <span style="font-size:10px;color:var(--text3)">(+RM'+parseFloat(a.reviewer_top20).toFixed(2)+' top-up)</span>':''}</td>
       <td style="font-family:'DM Mono',monospace;font-size:12px;color:var(--amber)">RM ${parseFloat(a.kc_commission||0).toFixed(2)}</td>
       <td>${statusBadge}</td>
-      <td><button class="btn btn-ghost btn-sm" onclick='openAllocEdit(${JSON.stringify(a)})'>Edit</button></td>
+      <td><button class="btn btn-ghost btn-sm" onclick="openAllocEditById('${(a.alloc_id||a.id||'').replace(/'/g,'')}')">Edit</button></td>
     </tr>`;
   }).join('');
+}
+
+function openAllocEditById(id) {
+  const a = ALLOCATIONS.find(x => (x.alloc_id||x.id||'') === id);
+  if (!a) { toast('Allocation not found — please reload.', 'error'); return; }
+  openAllocEdit(a);
 }
 
 function openAllocEdit(a) {
@@ -3200,38 +3206,28 @@ async function loadRetention() {
   // ── Deductions ─────────────────────────────────────────────
   // Hardcoded historical items (pre-system)
   const HARDCODED_DEDUCTIONS = [
-    { label: '2025 operating expenses (pre-system)',  amount: 537.25,  note: 'Hardcoded — historical' },
-    { label: '2025 dividend to KC',                   amount: 1000.00, note: 'Hardcoded' },
-    { label: 'Abot software subscription (2025)',     amount: 2700.00, note: 'Hardcoded' },
-    { label: 'March 2026 dividend to KC',             amount: 500.00,  note: 'Hardcoded' },
+    { label: '2025 operating expenses',              amount: 537.25,  note: 'GL 2025 — historical' },
+    { label: '2025 dividend paid',                    amount: 1000.00, note: 'GL 2025 — historical' },
+    { label: 'Abot software subscription (2025)',     amount: 2700.00, note: 'GL 2025 — historical' },
+    { label: '6ixteen courier charges',               amount: 32.40,   note: 'GL 2026 PV004.26' },
+    { label: 'Lunch at Onya',                         amount: 91.60,   note: 'GL 2026' },
+    { label: 'Raya Hamper for Ahmad (FRAZ)',          amount: 93.38,   note: 'GL 2026 PV006.26' },
+    { label: 'Raya Hamper for Ain (Freelance)',       amount: 93.38,   note: 'GL 2026 PV007.26' },
+    { label: 'Dividend paid — March 2026',            amount: 500.00,  note: 'GL 2026' },
+    { label: 'Rounding adjustment',                   amount: 2.53,    note: 'GL 2026' },
   ];
 
-  // Live: entertainment/hampers from vouchers
-  const vouchers = vRes.ok ? vRes.data : [];
-  const entertainVouchers = vouchers.filter(v =>
-    /entertainment|hamper|gift|dining|meal/i.test(v.category||'') ||
-    /entertainment|hamper|gift|dining/i.test(v.description||'')
-  );
-  const entertainTotal = r2(entertainVouchers.reduce((s,v) => s + parseFloat(v.amount||0), 0));
-
-  // Also pull any ABOT software vouchers NOT already in hardcoded (i.e. dated 2026+)
-  const abotLiveVouchers = vouchers.filter(v =>
-    (/software/i.test(v.category||'') || /abot/i.test(v.payee||v.description||'')) &&
-    (v.date||'').startsWith('2026')
-  );
-  const abotLiveTotal = r2(abotLiveVouchers.reduce((s,v) => s + parseFloat(v.amount||0), 0));
-
-  const allDeductions = [
-    ...HARDCODED_DEDUCTIONS,
-    ...(entertainTotal > 0 ? [{ label: `Entertainment / hampers (${entertainVouchers.length} voucher${entertainVouchers.length!==1?'s':''})`, amount: entertainTotal, note: 'From vouchers' }] : []),
-    ...(abotLiveTotal > 0  ? [{ label: `Abot software (2026 vouchers, ${abotLiveVouchers.length} entries)`, amount: abotLiveTotal, note: 'From vouchers' }] : []),
-  ];
+  const allDeductions = [...HARDCODED_DEDUCTIONS];
 
   const totalDeducted = r2(allDeductions.reduce((s,d) => s + d.amount, 0));
   const computedBal   = r2(totalPool - totalDeducted);
 
-  // ── Known manually-verified balance & variance ─────────────
-  const KNOWN_BALANCE = 4344.17; // manually verified figure
+  // ── GL-verified balance & variance ────────────────────────
+  // GL 2026 figures: Retained Abot 3,865.13 + Retained 15% 5,377.05 = 9,242.18
+  // Pool balance per GL = 9,242.18 − 5,050.54 deductions = 4,191.64
+  const GL_POOL       = 9242.18;
+  const GL_BALANCE    = 4191.64;
+  const KNOWN_BALANCE = GL_BALANCE;
   const variance      = r2(computedBal - KNOWN_BALANCE);
 
   // ── Metric cards ───────────────────────────────────────────
@@ -3245,6 +3241,9 @@ async function loadRetention() {
   varEl.style.color   = Math.abs(variance) < 0.01 ? 'var(--green)' : 'var(--amber)';
 
   // ── Pool panel ─────────────────────────────────────────────
+  // GL breakdown: Retained Abot vs Retained 15%
+  const glAbotPool  = r2(poolRows.reduce((s,r) => s + r.abotCost,  0));
+  const glAdminPool = r2(poolRows.reduce((s,r) => s + r.adminRet,  0));
   document.getElementById('ret-pool-rows').innerHTML =
     poolRows.map(r => `
       <div class="recon-row">
@@ -3256,8 +3255,20 @@ async function loadRetention() {
         </span>
         <span style="font-family:'DM Mono',monospace;font-weight:600">${fmt(r.rowTotal)}</span>
       </div>`).join('')
-    + `<div class="recon-row" style="font-weight:700;background:var(--surface2);margin-top:4px">
-        <span>Total Pool</span>
+    + `<div class="recon-row" style="background:var(--surface2);font-size:12px;color:var(--text2)">
+        <span>↳ Retained Abot (system)</span>
+        <span style="font-family:'DM Mono',monospace">${fmt(glAbotPool)}</span>
+       </div>
+       <div class="recon-row" style="background:var(--surface2);font-size:12px;color:var(--text2)">
+        <span>↳ Retained 15% admin (system)</span>
+        <span style="font-family:'DM Mono',monospace">${fmt(glAdminPool)}</span>
+       </div>
+       <div class="recon-row" style="background:var(--surface2);font-size:12px;color:var(--text3)">
+        <span>GL 2026 verified: Abot RM 3,865.13 + 15% RM 5,377.05</span>
+        <span style="font-family:'DM Mono',monospace">RM 9,242.18</span>
+       </div>
+       <div class="recon-row" style="font-weight:700;background:var(--surface2);margin-top:4px">
+        <span>Total Pool (system computed)</span>
         <span style="font-family:'DM Mono',monospace">${fmt(totalPool)}</span>
        </div>`;
 
@@ -3281,14 +3292,15 @@ async function loadRetention() {
         <span style="font-family:'DM Mono',monospace;font-weight:600">${variance > 0 ? '+' : '−'}${fmt(Math.abs(variance))}</span>
        </div>`;
   document.getElementById('ret-variance-rows').innerHTML = `
-    <div class="recon-row"><span>Total Pool (15% + Abot)</span><span style="font-family:'DM Mono',monospace">${fmt(totalPool)}</span></div>
+    <div class="recon-row"><span>Total Pool (system computed)</span><span style="font-family:'DM Mono',monospace">${fmt(totalPool)}</span></div>
+    <div class="recon-row" style="font-size:12px;color:var(--text3)"><span>  GL 2026 pool (Abot + 15%)</span><span style="font-family:'DM Mono',monospace">RM 9,242.18</span></div>
     <div class="recon-row"><span>Total Deductions</span><span style="font-family:'DM Mono',monospace;color:var(--red)">−${fmt(totalDeducted)}</span></div>
     <div class="recon-row" style="font-weight:700;border-top:2px solid var(--border);padding-top:8px">
       <span>Computed Balance</span>
       <span style="font-family:'DM Mono',monospace;color:${computedBal>=0?'var(--green)':'var(--red)'}">${fmt(computedBal)}</span>
     </div>
     <div class="recon-row" style="color:var(--text2)">
-      <span>Manually verified balance (KC)</span>
+      <span>GL 2026 verified balance</span>
       <span style="font-family:'DM Mono',monospace">${fmt(KNOWN_BALANCE)}</span>
     </div>
     ${varRow}
