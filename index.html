@@ -1373,7 +1373,7 @@ async function openInvoiceModal(id) {
   onJobTypeChange();
 
   if (id) {
-    const inv = INVOICES.find(x => x.inv_id === id);
+    const inv = INVOICES.find(x => String(x.inv_id) === String(id));
     if (!inv) return;
     document.getElementById('inv-modal-title').textContent = 'Edit Invoice — ' + inv.inv_no;
     document.getElementById('inv-no').value            = inv.inv_no;
@@ -1620,7 +1620,7 @@ function previewInvoice() {
 }
 
 function previewInvoiceById(id) {
-  const inv = INVOICES.find(i => i.inv_id === id);
+  const inv = INVOICES.find(i => String(i.inv_id) === String(id));
   if (!inv) return;
   renderInvoicePDF(inv);
   openModal('modal-pdf');
@@ -2274,7 +2274,7 @@ function rcBuildChecklist(invoicePool, preCheckId) {
   }
   list.innerHTML = invoicePool.map(inv => {
     const outstanding = parseFloat(inv.amount_outstanding || inv.amount || 0);
-    const checked = inv.inv_id === preCheckId ? 'checked' : '';
+    const checked = String(inv.inv_id) === String(preCheckId) ? 'checked' : '';
     return `<label style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border);cursor:pointer;font-size:13px">
       <input type="checkbox" class="rc-chk" data-inv-id="${inv.inv_id}" data-inv-no="${inv.inv_no}"
         data-client="${(inv.client_name||'').replace(/"/g,'&quot;')}" data-amount="${outstanding}"
@@ -2357,7 +2357,7 @@ async function saveReceipt() {
     const boxes   = document.querySelectorAll('#rc-inv-list .rc-chk:checked');
     const checked = Array.from(boxes);
     const inv = checked.length === 1
-      ? INVOICES.find(i => i.inv_id === checked[0].dataset.invId)
+      ? INVOICES.find(i => String(i.inv_id) === String(checked[0].dataset.invId))
       : null;
     if (!totalAmt) { toast('Please enter an amount.', 'error'); return; }
     const data = {
@@ -2395,7 +2395,7 @@ async function saveReceipt() {
 
   let saved = 0, failed = 0;
   for (const box of boxes) {
-    const inv    = INVOICES.find(i => i.inv_id === box.dataset.invId);
+    const inv    = INVOICES.find(i => String(i.inv_id) === String(box.dataset.invId));
     const amount = rcAmountEdited ? autoAmounts[box.dataset.invId] : parseFloat(box.dataset.amount||0);
     const data = {
       date, notes, amount,
@@ -3325,122 +3325,4 @@ async function loadRetention() {
 
   const totalPool = r2(poolRows.reduce((s,r) => s + r.rowTotal, 0));
 
-  // ── Deductions ─────────────────────────────────────────────
-  // Hardcoded historical items (pre-system)
-  const HARDCODED_DEDUCTIONS = [
-    { label: '2025 operating expenses',              amount: 537.25,  note: 'GL 2025 — historical' },
-    { label: '2025 dividend paid',                    amount: 1000.00, note: 'GL 2025 — historical' },
-    { label: 'Abot software subscription (2025)',     amount: 2700.00, note: 'GL 2025 — historical' },
-    { label: '6ixteen courier charges',               amount: 32.40,   note: 'GL 2026 PV004.26' },
-    { label: 'Lunch at Onya',                         amount: 91.60,   note: 'GL 2026' },
-    { label: 'Raya Hamper for Ahmad (FRAZ)',          amount: 93.38,   note: 'GL 2026 PV006.26' },
-    { label: 'Raya Hamper for Ain (Freelance)',       amount: 93.38,   note: 'GL 2026 PV007.26' },
-    { label: 'Dividend paid — March 2026',            amount: 500.00,  note: 'GL 2026' },
-    { label: 'Rounding adjustment',                   amount: 2.53,    note: 'GL 2026' },
-  ];
-
-  const allDeductions = [...HARDCODED_DEDUCTIONS];
-
-  const totalDeducted = r2(allDeductions.reduce((s,d) => s + d.amount, 0));
-  const computedBal   = r2(totalPool - totalDeducted);
-
-  // ── GL-verified balance & variance ────────────────────────
-  // GL 2026 figures: Retained Abot 3,865.13 + Retained 15% 5,377.05 = 9,242.18
-  // Pool balance per GL = 9,242.18 − 5,050.54 deductions = 4,191.64
-  const GL_POOL       = 9242.18;
-  const GL_BALANCE    = 4191.64;
-  const KNOWN_BALANCE = GL_BALANCE;
-  const variance      = r2(computedBal - KNOWN_BALANCE);
-
-  // ── Metric cards ───────────────────────────────────────────
-  document.getElementById('ret-pool-total').textContent      = fmt(totalPool);
-  document.getElementById('ret-deducted').textContent        = fmt(totalDeducted);
-  const balEl = document.getElementById('ret-balance');
-  balEl.textContent   = fmt(computedBal);
-  balEl.style.color   = computedBal >= 0 ? 'var(--green)' : 'var(--red)';
-  const varEl = document.getElementById('ret-variance-badge');
-  varEl.textContent   = (Math.abs(variance) < 0.01 ? '✓ Nil' : fmt(variance));
-  varEl.style.color   = Math.abs(variance) < 0.01 ? 'var(--green)' : 'var(--amber)';
-
-  // ── Pool panel ─────────────────────────────────────────────
-  // GL breakdown: Retained Abot vs Retained 15%
-  const glAbotPool  = r2(poolRows.reduce((s,r) => s + r.abotCost,  0));
-  const glAdminPool = r2(poolRows.reduce((s,r) => s + r.adminRet,  0));
-  document.getElementById('ret-pool-rows').innerHTML =
-    poolRows.map(r => `
-      <div class="recon-row">
-        <span style="flex:1">${r.inv_no} <span style="color:var(--text3);font-size:12px">— ${(r.client).substring(0,22)}</span></span>
-        <span style="font-size:11px;color:var(--text3);margin-right:8px">
-          ${r.adminRet>0?`15%: RM ${r.adminRet.toFixed(2)}`:''}
-          ${r.adminRet>0&&r.abotCost>0?' + ':''}
-          ${r.abotCost>0?`Abot: RM ${r.abotCost.toFixed(2)}`:''}
-        </span>
-        <span style="font-family:'DM Mono',monospace;font-weight:600">${fmt(r.rowTotal)}</span>
-      </div>`).join('')
-    + `<div class="recon-row" style="background:var(--surface2);font-size:12px;color:var(--text2)">
-        <span>↳ Retained Abot (system)</span>
-        <span style="font-family:'DM Mono',monospace">${fmt(glAbotPool)}</span>
-       </div>
-       <div class="recon-row" style="background:var(--surface2);font-size:12px;color:var(--text2)">
-        <span>↳ Retained 15% admin (system)</span>
-        <span style="font-family:'DM Mono',monospace">${fmt(glAdminPool)}</span>
-       </div>
-       <div class="recon-row" style="background:var(--surface2);font-size:12px;color:var(--text3)">
-        <span>GL 2026 verified: Abot RM 3,865.13 + 15% RM 5,377.05</span>
-        <span style="font-family:'DM Mono',monospace">RM 9,242.18</span>
-       </div>
-       <div class="recon-row" style="font-weight:700;background:var(--surface2);margin-top:4px">
-        <span>Total Pool (system computed)</span>
-        <span style="font-family:'DM Mono',monospace">${fmt(totalPool)}</span>
-       </div>`;
-
-  // ── Deductions panel ───────────────────────────────────────
-  document.getElementById('ret-abot-rows').innerHTML =
-    allDeductions.map(d => `
-      <div class="recon-row">
-        <span style="flex:1">${d.label} <span style="font-size:11px;color:var(--text3)">${d.note||''}</span></span>
-        <span style="font-family:'DM Mono',monospace;color:var(--red)">−${fmt(d.amount)}</span>
-      </div>`).join('')
-    + `<div class="recon-row" style="font-weight:700;background:var(--surface2);margin-top:4px">
-        <span>Total Deducted</span>
-        <span style="font-family:'DM Mono',monospace;color:var(--red)">−${fmt(totalDeducted)}</span>
-       </div>`;
-
-  // ── Reconciliation summary ─────────────────────────────────
-  const varRow = Math.abs(variance) < 0.01
-    ? `<div class="recon-row" style="color:var(--green);font-weight:600"><span>✓ Fully reconciled</span><span></span></div>`
-    : `<div class="recon-row" style="color:var(--amber)">
-        <span>Unreconciled variance <span style="font-size:11px;color:var(--text3)">(computed vs known RM ${KNOWN_BALANCE.toFixed(2)})</span></span>
-        <span style="font-family:'DM Mono',monospace;font-weight:600">${variance > 0 ? '+' : '−'}${fmt(Math.abs(variance))}</span>
-       </div>`;
-  document.getElementById('ret-variance-rows').innerHTML = `
-    <div class="recon-row"><span>Total Pool (system computed)</span><span style="font-family:'DM Mono',monospace">${fmt(totalPool)}</span></div>
-    <div class="recon-row" style="font-size:12px;color:var(--text3)"><span>  GL 2026 pool (Abot + 15%)</span><span style="font-family:'DM Mono',monospace">RM 9,242.18</span></div>
-    <div class="recon-row"><span>Total Deductions</span><span style="font-family:'DM Mono',monospace;color:var(--red)">−${fmt(totalDeducted)}</span></div>
-    <div class="recon-row" style="font-weight:700;border-top:2px solid var(--border);padding-top:8px">
-      <span>Computed Balance</span>
-      <span style="font-family:'DM Mono',monospace;color:${computedBal>=0?'var(--green)':'var(--red)'}">${fmt(computedBal)}</span>
-    </div>
-    <div class="recon-row" style="color:var(--text2)">
-      <span>GL 2026 verified balance</span>
-      <span style="font-family:'DM Mono',monospace">${fmt(KNOWN_BALANCE)}</span>
-    </div>
-    ${varRow}
-  `;
-}
-
-// ══ POPULATE YEAR DROPDOWNS ══
-function populateYearDropdowns() {
-  const currentYear = new Date().getFullYear();
-  const years = [];
-  for (let y = currentYear; y >= currentYear - 3; y--) years.push(y);
-  ['is-filter-year','sa-filter-year','ret-filter-year'].forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.innerHTML = '<option value="">All time</option>' +
-      years.map(y => `<option value="${y}">${y}</option>`).join('');
-  });
-}
-</script>
-</body>
-</html>
+  // ── Deductions ──────────
