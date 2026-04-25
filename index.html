@@ -1349,7 +1349,8 @@ function renderInvoices(data) {
       <td>${jobTypeBadge(i.job_type)}</td>
       <td style="font-family:'DM Mono',monospace;font-size:13px">RM ${parseFloat(i.amount||0).toLocaleString('en-MY',{minimumFractionDigits:2})}</td>
       <td>${statusBadge(i.status)}</td>
-      <td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openInvoiceModal('${i.inv_id}')">Edit</button>
         <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();previewInvoiceById('${i.inv_id}')">PDF</button>
         <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openReceiptForInvoice('${i.inv_id}')">Receipt</button>
       </td>
