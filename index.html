@@ -1190,9 +1190,10 @@ function getSetting(key, def) {
 // DASHBOARD
 // ══════════════════════════════════════════════════
 async function loadDashboard() {
-  const [summaryRes, rcRes] = await Promise.all([
+  const [summaryRes, rcRes, pvRes] = await Promise.all([
     api({ action: 'dashboard_summary' }),
     api({ action: 'get_receipts' }),
+    api({ action: 'get_vouchers' }),
   ]);
   if (!summaryRes.ok) return;
   const d = summaryRes.data;
@@ -1200,6 +1201,7 @@ async function loadDashboard() {
 
   // ── Build paid-amount map from receipts (inv_no → total received), excluding voided ──
   const receipts = (rcRes.ok ? rcRes.data : []).filter(r => (!isDeleted('receipts',(r.receipt_id||r.id||'').toString()) && !(r.notes||'').startsWith('__VOID__')));
+  const vouchers = (pvRes.ok ? pvRes.data : []).filter(v => (!isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__')));
   const paidMap = {};  // inv_no → total paid
   receipts.forEach(r => {
     if (r.inv_no) paidMap[r.inv_no] = r2((paidMap[r.inv_no] || 0) + parseFloat(r.amount || 0));
@@ -1216,11 +1218,17 @@ async function loadDashboard() {
   const outstandingInvs = INVOICES.filter(i => i.status === 'outstanding' || i.status === 'partial');
   const correctedOutstanding = r2(outstandingInvs.reduce((s, i) => s + remaining(i), 0));
 
+  // ── Recalculate bank balance client-side (server doesn't know about local deletes) ──
+  const OB_BANK   = 761.96;
+  const bankRc    = receipts.filter(r => r.payment_account !== 'drawings').reduce((s,r) => s + parseFloat(r.amount||0), 0);
+  const bankPv    = vouchers.filter(v => v.payment_account !== 'drawings').reduce((s,v) => s + parseFloat(v.amount||0), 0);
+  const bankBal   = r2(OB_BANK + bankRc - bankPv);
+
   document.getElementById('dm-billed').textContent     = fmt(d.total_billed);
   document.getElementById('dm-received').textContent   = fmt(d.total_received);
   document.getElementById('dm-outstanding').textContent = fmt(correctedOutstanding);
   document.getElementById('dm-outstanding-count').textContent = outstandingInvs.length + ' invoices';
-  document.getElementById('dm-bank').textContent       = fmt(d.bank_balance);
+  document.getElementById('dm-bank').textContent       = fmt(bankBal);
   document.getElementById('dm-month').textContent      = fmt(d.this_month_billed);
   document.getElementById('dm-month-count').textContent = d.this_month_count + ' invoices';
   document.getElementById('dm-clients').textContent    = d.total_clients;
