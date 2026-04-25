@@ -2987,9 +2987,17 @@ const IS_EXP_ORDER = ['Soleprop wages','Subcon charges TXY 1','Subcon charges IV
   'Telephone','Commission','General expenses','Incorporation expenses'];
 
 async function loadIncomeStatement() {
+  document.getElementById('is-table').innerHTML = '<div style="padding:20px;color:var(--text3)">Loading…</div>';
   const year = document.getElementById('is-filter-year').value;
   const [invRes, vRes] = await Promise.all([api({action:'get_invoices'}), api({action:'get_vouchers'})]);
-  if (!invRes.ok || !vRes.ok) return;
+  if (!invRes.ok) {
+    document.getElementById('is-table').innerHTML = `<div style="padding:20px;color:var(--red)">Failed to load: ${invRes.error||'invoices error'}</div>`;
+    return;
+  }
+  if (!vRes.ok) {
+    document.getElementById('is-table').innerHTML = `<div style="padding:20px;color:var(--red)">Failed to load: ${vRes.error||'vouchers error'}</div>`;
+    return;
+  }
 
   // Populate year filter if empty
   const yearSel = document.getElementById('is-filter-year');
@@ -3051,11 +3059,15 @@ async function loadIncomeStatement() {
 
 // ══ BALANCE SHEET ══
 async function loadBalanceSheet() {
+  document.getElementById('bs-assets').innerHTML = '<div style="padding:20px;color:var(--text3)">Loading…</div>';
   const [invRes, rcRes, vRes, glRes] = await Promise.all([
     api({action:'get_invoices'}), api({action:'get_receipts'}),
     api({action:'get_vouchers'}), api({action:'get_gl', filters:{}})
   ]);
-  if (!invRes.ok) return;
+  if (!invRes.ok) {
+    document.getElementById('bs-assets').innerHTML = `<div style="padding:20px;color:var(--red)">Failed to load: ${invRes.error||'invoices error'}</div>`;
+    return;
+  }
 
   const invoices  = invRes.data.filter(i => i.status !== 'cancelled');
   const receipts  = (rcRes.ok ? rcRes.data : []).filter(r => (!isDeleted('receipts',(r.receipt_id||r.id||'').toString()) && !(r.notes||'').startsWith('__VOID__')));
