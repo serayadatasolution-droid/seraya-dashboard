@@ -211,8 +211,6 @@
   .fin-sub-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text3); padding: 8px 16px 4px; border-bottom: 1px solid var(--border); background: var(--bg); }
   .fin-neg { color: var(--red); }
   .fin-row { display: flex; justify-content: space-between; padding: 8px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
-  .fin-row-clickable { cursor: pointer; transition: background 0.1s; }
-  .fin-row-clickable:hover { background: var(--surface2); }
   .fin-row:last-child { border-bottom: none; }
   .fin-row.subtotal { font-weight: 600; background: var(--surface2); }
   .fin-row.total { font-weight: 700; font-size: 14px; background: var(--accent); color: #fff; }
@@ -3669,6 +3667,32 @@ function renderGLRows(rows) {
     } catch(e) { console.warn('B/F lookup failed', e); }
   }
 
+  // Determine the natural side for the filtered account so the running balance
+  // displays with the user-friendly sign (DR-natural = positive when debited;
+  // CR-natural = positive when credited).
+  // DR-natural: assets, expenses, direct cost, depreciation, drawings (equity drawings sub)
+  // CR-natural: revenue, other income, liabilities, equity (capital, retained, profit)
+  let drNatural = true;
+  if (accountFilter) {
+    try {
+      const coa = getCOA();
+      const acct = coa.find(a => {
+        const full = `${a.code||''} ${a.name||''}`.toLowerCase();
+        return full === accountFilter || (a.name||'').toLowerCase() === accountFilter;
+      });
+      if (acct) {
+        const sec = COA_SECTIONS[acct.section] || {};
+        const isDrawings = /drawing/i.test(acct.name||'') || acct.code === '3300';
+        // DR-natural sections: assets and expenses
+        const drSections = ['non_current_asset','current_asset','direct_cost','admin_expense','depreciation'];
+        drNatural = drSections.includes(acct.section) || isDrawings;
+      } else {
+        // No COA match — guess from name
+        if (/revenue|income|capital|retain|liability|payable|accru/i.test(accountFilter)) drNatural = false;
+      }
+    } catch(e) {}
+  }
+
   // Build row HTML in ASC order with running balance, then re-sort if needed for display
   let running = bfAmount;
   const augmented = sortedAsc.map(g => {
@@ -3677,10 +3701,15 @@ function renderGLRows(rows) {
       const dr = (g.dr_account||'').toLowerCase();
       const cr = (g.cr_account||'').toLowerCase();
       const amt = parseFloat(g.amount||0);
-      // Account is debited → balance increases (for assets/expenses); credited → decreases
-      // We use sign convention: DR = +, CR = − (so for liability/equity/income accounts the running shows as negative, which is technically correct)
-      if (dr === accountFilter) delta += amt;
-      if (cr === accountFilter) delta -= amt;
+      // Sign convention adapts to natural side of the account
+      if (drNatural) {
+        if (dr === accountFilter) delta += amt;
+        if (cr === accountFilter) delta -= amt;
+      } else {
+        // CR-natural: credits increase the balance, debits decrease
+        if (cr === accountFilter) delta += amt;
+        if (dr === accountFilter) delta -= amt;
+      }
       running += delta;
     }
     return { g, delta, running };
@@ -3726,8 +3755,11 @@ function renderGLRows(rows) {
       if (dr === accountFilter) totalDr += amt;
       if (cr === accountFilter) totalCr += amt;
     });
+    const formula = drNatural
+      ? `B/F + DR ${fmt(totalDr)} − CR ${fmt(totalCr)}`
+      : `B/F + CR ${fmt(totalCr)} − DR ${fmt(totalDr)}`;
     totalRowHtml = `<tr style="background:var(--accent);color:#fff;font-weight:600">
-      <td colspan="3" style="font-size:12px;padding:10px 12px">Closing balance (B/F + DR ${fmt(totalDr)} − CR ${fmt(totalCr)})</td>
+      <td colspan="3" style="font-size:12px;padding:10px 12px">Closing balance (${formula})</td>
       <td></td><td></td>
       <td style="font-family:'DM Mono',monospace;font-size:13px;text-align:right">—</td>
       <td style="font-family:'DM Mono',monospace;font-size:13px;text-align:right">RM ${fmt(closing)}</td>
