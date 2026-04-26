@@ -409,11 +409,13 @@
         <select class="filter-select" onchange="filterInvoices()" id="inv-filter-type">
           <option value="">All types</option>
           <option value="MBRS">MBRS</option>
+          <option value="Cosec">Cosec</option>
           <option value="Tax">Tax</option>
           <option value="FS">FS</option>
           <option value="Bookkeeping">Bookkeeping</option>
-          <option value="Cosec_Retainer">Cosec Retainer</option>
-          <option value="Cosec_Other">Cosec Other</option>
+          <option value="Audit">Audit</option>
+          <option value="Personal_Tax">Personal Tax</option>
+          <option value="Advisory">Advisory</option>
         </select>
       </div>
       <div class="card">
@@ -435,19 +437,26 @@
       </div>
       <div class="filters">
         <input class="search-input" type="text" placeholder="Search client or billing party…" oninput="filterClients()" id="client-search" />
-        <select class="filter-select" onchange="filterClients()" id="client-filter-type">
-          <option value="">All types</option>
-          <option value="MBRS">MBRS</option>
-          <option value="Tax">Tax</option>
-          <option value="FS">FS</option>
-          <option value="Bookkeeping">Bookkeeping</option>
-          <option value="Cosec">Cosec</option>
+        <select class="filter-select" onchange="filterClients()" id="client-filter-service">
+          <option value="">All services</option>
+          <option value="mbrs">MBRS</option>
+          <option value="cosec">Cosec</option>
+          <option value="tax">Tax</option>
+          <option value="audit">Audit</option>
+          <option value="bookkeeping">Accounting/Bookkeeping</option>
+          <option value="fs">FS (Audit Exemption)</option>
+        </select>
+        <select class="filter-select" onchange="filterClients()" id="client-group-by">
+          <option value="">No grouping</option>
+          <option value="service">Group by Service</option>
+          <option value="year_end">Group by Year-end</option>
+          <option value="billing_party">Group by Billing Party</option>
         </select>
       </div>
       <div class="card">
         <table>
-          <thead><tr><th>Client Name</th><th>Reg No.</th><th>Type</th><th>Billing Party</th><th>Address</th><th></th></tr></thead>
-          <tbody id="client-tbody"><tr class="loading-row"><td colspan="6">Loading clients…</td></tr></tbody>
+          <thead><tr><th>Client Name</th><th>Reg No.</th><th>Services</th><th>Year-end</th><th>Billing Party</th><th>Address</th><th></th></tr></thead>
+          <tbody id="client-tbody"><tr class="loading-row"><td colspan="7">Loading clients…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -559,6 +568,14 @@
         <div class="page-title">Receipts</div>
         <div class="page-sub">Record payments received from clients</div>
         <div class="page-actions">
+          <select class="filter-select" id="rc-sort" onchange="renderReceiptRows(RECEIPTS)">
+            <option value="date-desc">Date ↓ (newest first)</option>
+            <option value="date-asc">Date ↑ (oldest first)</option>
+            <option value="amount-desc">Amount ↓ (largest first)</option>
+            <option value="amount-asc">Amount ↑ (smallest first)</option>
+            <option value="client-asc">Client A→Z</option>
+            <option value="ref-desc">Receipt No ↓</option>
+          </select>
           <button class="btn btn-primary" onclick="openReceiptModal()">+ New Receipt</button>
         </div>
       </div>
@@ -576,6 +593,15 @@
         <div class="page-title">Payment Vouchers</div>
         <div class="page-sub">Record payments made — wages, expenses, Cecilia, Ho, Abot</div>
         <div class="page-actions">
+          <select class="filter-select" id="pv-sort" onchange="renderVoucherRows(VOUCHERS)">
+            <option value="date-desc">Date ↓ (newest first)</option>
+            <option value="date-asc">Date ↑ (oldest first)</option>
+            <option value="amount-desc">Amount ↓ (largest first)</option>
+            <option value="amount-asc">Amount ↑ (smallest first)</option>
+            <option value="payee-asc">Payee A→Z</option>
+            <option value="category-asc">Category A→Z</option>
+            <option value="ref-desc">Voucher No ↓</option>
+          </select>
           <button class="btn btn-primary" onclick="openVoucherModal()">+ New Voucher</button>
         </div>
       </div>
@@ -621,7 +647,7 @@
       </div>
       <div class="card">
         <table>
-          <thead><tr><th>Date</th><th>Ref</th><th>Description</th><th>DR Account</th><th>CR Account</th><th style="text-align:right">Amount (RM)</th><th style="text-align:right">Running (RM)</th><th></th></tr></thead>
+          <thead><tr><th>Date</th><th>Ref</th><th>Description</th><th>DR Account</th><th>CR Account</th><th style="text-align:right">Amount (RM)</th><th></th></tr></thead>
           <tbody id="gl-tbody"><tr class="loading-row"><td colspan="7">Loading GL…</td></tr></tbody>
         </table>
       </div>
@@ -835,13 +861,14 @@
         <div class="form-field">
           <label>Job Type</label>
           <select id="inv-job-type" onchange="onJobTypeChange()">
-            <option value="MBRS">MBRS Preparation</option>
+            <option value="MBRS">MBRS</option>
             <option value="Bookkeeping">Bookkeeping</option>
-            <option value="Tax">Tax Computation / Filing</option>
-            <option value="FS">Financial Statements (Audit Exemption)</option>
-            <option value="Cosec_Retainer">Cosec — Retainer (Type B)</option>
-            <option value="Cosec_Other">Cosec — Other (AR, BO, AFS) (Type C)</option>
-            <option value="Advisory">Advisory / Consultancy</option>
+            <option value="Tax">Tax</option>
+            <option value="FS">FS (Audit Exemption)</option>
+            <option value="Cosec">Cosec</option>
+            <option value="Audit">Audit</option>
+            <option value="Personal_Tax">Personal Tax</option>
+            <option value="Advisory">Advisory</option>
             <option value="Other">Other</option>
           </select>
         </div>
@@ -958,6 +985,11 @@
         <div class="form-field"><label>Billing Party Reg</label><input type="text" id="cl-billing-reg" placeholder="e.g. TR0222795-U" /></div>
         <div class="form-field form-full"><label>Billing Address</label><textarea id="cl-billing-addr" rows="3"></textarea></div>
         <div class="form-field form-full"><label>Client Address (registered)</label><textarea id="cl-client-addr" rows="3"></textarea></div>
+        <div class="form-field"><label>Year-end (MM-DD)</label><input type="text" id="cl-year-end" placeholder="e.g. 12-31" maxlength="5" /></div>
+        <div class="form-field form-full">
+          <label>Services this client uses (check all that apply)</label>
+          <div id="cl-services-wrap" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px"></div>
+        </div>
       </div>
     </div>
     <div class="modal-footer">
@@ -1431,12 +1463,57 @@ function getCOA() {
     const raw = localStorage.getItem(COA_LS_KEY);
     if (!raw) return JSON.parse(JSON.stringify(COA_DEFAULT));
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.length ? parsed : JSON.parse(JSON.stringify(COA_DEFAULT));
+    let coa = Array.isArray(parsed) && parsed.length ? parsed : JSON.parse(JSON.stringify(COA_DEFAULT));
+    // Self-heal: any account that exists in COA_DEFAULT with mapsFrom but is missing it locally
+    // gets the mapsFrom restored. This fixes the GL/IS/BS name mismatch caused by an earlier
+    // Sync that incorrectly stripped mapsFrom.
+    let healed = false;
+    coa.forEach(a => {
+      const def = COA_DEFAULT.find(d => d.code === a.code);
+      if (def && def.mapsFrom && (!a.mapsFrom || !a.mapsFrom.length)) {
+        a.mapsFrom = JSON.parse(JSON.stringify(def.mapsFrom));
+        healed = true;
+      }
+    });
+    if (healed) localStorage.setItem(COA_LS_KEY, JSON.stringify(coa));
+    return coa;
   } catch (e) { return JSON.parse(JSON.stringify(COA_DEFAULT)); }
 }
 
 function saveCOA(coa) { localStorage.setItem(COA_LS_KEY, JSON.stringify(coa)); }
 function resetCOA()    { localStorage.removeItem(COA_LS_KEY); }
+
+
+// ══════════════════════════════════════════════════
+// CLIENT META (services tags + year_end) — localStorage sidecar
+// Backend Clients sheet doesn't have these fields, so we store them here.
+// Format: { client_id: { services: ['mbrs','cosec',...], year_end: 'MM-DD' } }
+// ══════════════════════════════════════════════════
+const CLIENT_META_KEY = 'seraya_client_meta_v1';
+const CLIENT_SERVICES = ['mbrs','cosec','tax','audit','bookkeeping','fs'];
+const CLIENT_SERVICE_LABELS = {
+  mbrs:'MBRS', cosec:'Cosec', tax:'Tax', audit:'Audit', bookkeeping:'Accounting/Bookkeeping', fs:'FS (Audit Exemption)'
+};
+
+function getAllClientMeta() {
+  try {
+    const raw = localStorage.getItem(CLIENT_META_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch(e) { return {}; }
+}
+
+function getClientMeta(client_id) {
+  if (!client_id) return { services: [], year_end: '' };
+  const all = getAllClientMeta();
+  return all[client_id] || { services: [], year_end: '' };
+}
+
+function setClientMeta(client_id, meta) {
+  if (!client_id) return;
+  const all = getAllClientMeta();
+  all[client_id] = { services: meta.services || [], year_end: meta.year_end || '' };
+  localStorage.setItem(CLIENT_META_KEY, JSON.stringify(all));
+}
 
 function computeAccountValue(acct, invoices, vouchers) {
   // Priority: explicit hardcoded value (snapshot) ALWAYS wins over live mapsFrom.
@@ -1524,13 +1601,13 @@ async function openAccountDrill(code) {
   openModal('modal-account-drill');
   document.getElementById('drill-title').textContent = 'Loading…';
   document.getElementById('drill-summary').innerHTML = '';
-  document.getElementById('drill-tbody').innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">Loading transactions…</td></tr>';
+  document.getElementById('drill-tbody').innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text3);padding:20px">Loading transactions…</td></tr>';
 
   const coa = getCOA();
   const acct = coa.find(a => a.code === code);
   if (!acct) {
     document.getElementById('drill-title').textContent = 'Account not found';
-    document.getElementById('drill-tbody').innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">Code ' + code + ' is not in your Chart of Accounts.</td></tr>';
+    document.getElementById('drill-tbody').innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text3);padding:20px">Code ' + code + ' is not in your Chart of Accounts.</td></tr>';
     return;
   }
 
@@ -1561,15 +1638,6 @@ async function openAccountDrill(code) {
         amount: ob.amount
       });
     }
-  }
-
-  // 1b) Excel snapshot value (if account has a hardcoded value, show it as a synthetic row)
-  if (acct.value !== undefined && acct.value !== null && acct.value !== '') {
-    txns.push({
-      date: '', ref: 'SNAP', type: 'SNAP',
-      description: 'Excel snapshot value (hardcoded — overrides live aggregation)',
-      amount: parseFloat(acct.value)
-    });
   }
 
   // 2) Live transactions based on COA mapping & special account roles
@@ -1673,12 +1741,12 @@ async function openAccountDrill(code) {
     });
   }
 
-  // Sort by date asc
+  // Sort by date asc and compute live total (no SNAP duplication)
   txns.sort((a,b) => (a.date||'').localeCompare(b.date||''));
-
-  // Compute running balance
-  let running = 0;
-  txns.forEach(t => { running += parseFloat(t.amount||0); t.running = running; });
+  const liveTotal = txns.reduce((s, t) => s + parseFloat(t.amount||0), 0);
+  const hasSnapshot = (acct.value !== undefined && acct.value !== null && acct.value !== '');
+  const snapshotVal = hasSnapshot ? parseFloat(acct.value) : null;
+  const variance    = hasSnapshot ? (liveTotal - snapshotVal) : 0;
 
   // Render
   const fmt   = n => parseFloat(Math.abs(n||0)).toLocaleString('en-MY',{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -1689,17 +1757,20 @@ async function openAccountDrill(code) {
   document.getElementById('drill-summary').innerHTML =
     '<div style="display:flex;gap:24px;flex-wrap:wrap">' +
     '<div><span style="color:var(--text3)">Section:</span> <strong>' + sec.label + '</strong> <span style="color:var(--text3)">(' + (sec.statement||'') + ')</span></div>' +
-    '<div><span style="color:var(--text3)">Hardcoded:</span> <strong>' + (acct.value !== undefined && acct.value !== null && acct.value !== '' ? 'RM ' + fmt(acct.value) : '—') + '</strong></div>' +
-    '<div><span style="color:var(--text3)">Live total (from txns):</span> <strong>RM ' + fmt(running) + '</strong></div>' +
+    (hasSnapshot
+      ? '<div><span style="color:var(--text3)">Snapshot value (drives IS/BS):</span> <strong style="color:var(--green)">RM ' + fmt(snapshotVal) + '</strong></div>'
+        + '<div><span style="color:var(--text3)">Live total from transactions:</span> <strong>RM ' + fmt(liveTotal) + '</strong></div>'
+        + (Math.abs(variance) > 0.01 ? '<div><span style="color:var(--amber)">Variance:</span> <strong style="color:var(--amber)">RM ' + fmt(variance) + '</strong></div>' : '')
+      : '<div><span style="color:var(--text3)">Total:</span> <strong>RM ' + fmt(liveTotal) + '</strong></div>') +
     '<div><span style="color:var(--text3)">Transactions:</span> <strong>' + txns.length + '</strong></div>' +
     (acct.mapsFrom && acct.mapsFrom.length ? '<div><span style="color:var(--text3)">Mapped from:</span> <code style="font-size:11px">' + acct.mapsFrom.join(', ') + '</code></div>' : '') +
     '</div>';
 
   const tbody = document.getElementById('drill-tbody');
   if (!txns.length) {
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">No transactions for this account.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text3);padding:20px">No live transactions for this account.</td></tr>';
   } else {
-    tbody.innerHTML = txns.map(t => {
+    const rows = txns.map(t => {
       const dt = (t.date||'').slice(0,10);
       const amtCol = t.type === 'NOTE' ? 'var(--text3)' : valColor(t.amount);
       return '<tr>' +
@@ -1708,9 +1779,13 @@ async function openAccountDrill(code) {
         '<td style="font-size:13px">' + (t.description||'') + '</td>' +
         '<td><span class="badge" style="font-size:10px">' + t.type + '</span></td>' +
         '<td style="text-align:right;font-family:\'DM Mono\',monospace;color:' + amtCol + '">' + sign(t.amount) + '</td>' +
-        '<td style="text-align:right;font-family:\'DM Mono\',monospace;color:var(--text2)">' + sign(t.running) + '</td>' +
       '</tr>';
     }).join('');
+    const totalRow = '<tr style="background:var(--surface2);font-weight:600">' +
+      '<td colspan="4" style="font-size:12px;padding:10px 12px">Total — ' + txns.length + ' transactions</td>' +
+      '<td style="text-align:right;font-family:\'DM Mono\',monospace">' + sign(liveTotal) + '</td>' +
+      '</tr>';
+    tbody.innerHTML = rows + totalRow;
   }
 
   openModal('modal-account-drill');
@@ -1799,30 +1874,75 @@ async function loadClients() {
 function renderClients(data) {
   const rows = data || CLIENTS;
   const tbody = document.getElementById('client-tbody');
-  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--text3)">No clients yet. Click + New Client to add one.</td></tr>'; return; }
-  tbody.innerHTML = rows.map(c => `
-    <tr onclick="openClientModal('${c.client_id}')">
-      <td><strong>${c.name}</strong></td>
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text3)">No clients yet. Click + New Client to add one.</td></tr>'; return; }
+  const groupBy = document.getElementById('client-group-by')?.value || '';
+  const renderRow = (c) => {
+    const meta = getClientMeta(c.client_id);
+    const svcBadges = (meta.services||[]).map(s =>
+      `<span class="badge" style="font-size:10px;margin-right:3px">${CLIENT_SERVICE_LABELS[s] || s}</span>`
+    ).join('') || '<span style="color:var(--text3);font-size:11px">—</span>';
+    return `<tr onclick="openClientModal('${c.client_id}')" style="cursor:pointer">
+      <td><strong>${c.name||''}</strong></td>
       <td style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text2)">${c.reg_no || '—'}</td>
-      <td>${typeBadge(c.type)}</td>
+      <td>${svcBadges}</td>
+      <td style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text2)">${meta.year_end || '—'}</td>
       <td style="color:var(--text2)">${c.billing_party || '—'}</td>
       <td style="font-size:12px;color:var(--text3)">${c.client_addr ? '✓ On file' : '<span style="color:var(--amber)">Missing</span>'}</td>
       <td><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openClientModal('${c.client_id}')">Edit</button></td>
-    </tr>`).join('');
+    </tr>`;
+  };
+
+  if (!groupBy) {
+    tbody.innerHTML = rows.map(renderRow).join('');
+    return;
+  }
+
+  // Group rows
+  const groups = {};
+  rows.forEach(c => {
+    const meta = getClientMeta(c.client_id);
+    let keys = [];
+    if (groupBy === 'service') keys = (meta.services && meta.services.length) ? meta.services.map(s => CLIENT_SERVICE_LABELS[s]||s) : ['(no services tagged)'];
+    else if (groupBy === 'year_end') keys = [meta.year_end || '(no year-end)'];
+    else if (groupBy === 'billing_party') keys = [c.billing_party || '(no billing party)'];
+    keys.forEach(k => { (groups[k] = groups[k] || []).push(c); });
+  });
+  const sortedKeys = Object.keys(groups).sort((a,b) => a.localeCompare(b));
+  tbody.innerHTML = sortedKeys.map(k => {
+    const rowsHtml = groups[k].map(renderRow).join('');
+    return `<tr style="background:var(--surface2)"><td colspan="7" style="font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding:8px 12px;color:var(--text2)">${k} <span style="color:var(--text3);font-weight:400">(${groups[k].length})</span></td></tr>` + rowsHtml;
+  }).join('');
 }
 
 function filterClients() {
   const q = document.getElementById('client-search').value.toLowerCase();
-  const t = document.getElementById('client-filter-type').value;
-  renderClients(CLIENTS.filter(c =>
-    (!q || c.name.toLowerCase().includes(q) || (c.billing_party||'').toLowerCase().includes(q)) &&
-    (!t || c.type === t)
-  ));
+  const svc = document.getElementById('client-filter-service')?.value || '';
+  const filtered = CLIENTS.filter(c => {
+    if (q && !((c.name||'').toLowerCase().includes(q) || (c.billing_party||'').toLowerCase().includes(q))) return false;
+    if (svc) {
+      const meta = getClientMeta(c.client_id);
+      if (!(meta.services||[]).includes(svc)) return false;
+    }
+    return true;
+  });
+  renderClients(filtered);
 }
 
 let editingClientId = null;
 function openClientModal(id) {
   editingClientId = id || null;
+  // Populate the services-checkbox container fresh each time
+  const meta = id ? getClientMeta(id) : { services: [], year_end: '' };
+  const wrap = document.getElementById('cl-services-wrap');
+  if (wrap) {
+    wrap.innerHTML = CLIENT_SERVICES.map(s => {
+      const checked = meta.services.includes(s) ? 'checked' : '';
+      return `<label style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:var(--surface2);border-radius:6px;cursor:pointer;font-size:13px">
+        <input type="checkbox" value="${s}" ${checked} class="cl-svc-chk" /> ${CLIENT_SERVICE_LABELS[s]}
+      </label>`;
+    }).join('');
+  }
+  document.getElementById('cl-year-end').value = meta.year_end || '';
   if (id) {
     const c = CLIENTS.find(x => x.client_id === id);
     if (!c) return;
@@ -1854,6 +1974,11 @@ async function saveClient() {
   if (!data.name) { toast('Client name is required.', 'error'); return; }
   const res = await api({ action: 'save_client', data });
   if (res.ok) {
+    // Persist services + year_end in localStorage sidecar
+    const services = Array.from(document.querySelectorAll('.cl-svc-chk:checked')).map(el => el.value);
+    const year_end = document.getElementById('cl-year-end').value.trim();
+    const id = (res.data && res.data.client_id) || data.client_id;
+    if (id) setClientMeta(id, { services, year_end });
     toast('Client saved.', 'success');
     closeModal('modal-client');
     loadClients();
@@ -1893,10 +2018,30 @@ function filterInvoices() {
   const q = document.getElementById('inv-search').value.toLowerCase();
   const s = document.getElementById('inv-filter-status').value;
   const t = document.getElementById('inv-filter-type').value;
+  // Build a paid-amount map so "partial" can include outstanding invoices with partial payment
+  const paidMap = {};
+  (RECEIPTS||[]).forEach(r => { if (r.inv_no) paidMap[r.inv_no] = (paidMap[r.inv_no]||0) + parseFloat(r.amount||0); });
+  const matchStatus = (i) => {
+    if (!s) return true;
+    if (s === 'partial') {
+      // Either explicit partial status, OR outstanding with some payment received
+      if (i.status === 'partial') return true;
+      if (i.status === 'outstanding' && (paidMap[i.inv_no]||0) > 0) return true;
+      return false;
+    }
+    return i.status === s;
+  };
+  // Also normalize Cosec variants — searching for "Cosec" matches retainer + other
+  const matchType = (i) => {
+    if (!t) return true;
+    const jt = (i.job_type||'').toLowerCase();
+    const tt = t.toLowerCase();
+    if (tt === 'cosec') return jt === 'cosec' || jt === 'cosec_retainer' || jt === 'cosec_other';
+    return jt === tt;
+  };
   renderInvoices(INVOICES.filter(i =>
-    (!q || i.inv_no.toLowerCase().includes(q) || i.client_name.toLowerCase().includes(q)) &&
-    (!s || i.status === s) &&
-    (!t || i.job_type === t)
+    (!q || (i.inv_no||'').toLowerCase().includes(q) || (i.client_name||'').toLowerCase().includes(q)) &&
+    matchStatus(i) && matchType(i)
   ));
 }
 
@@ -2752,7 +2897,18 @@ function renderPayoutDetail() {
 function renderReceiptRows(rows) {
   const tbody = document.getElementById('receipt-tbody');
   if (!rows.length) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--text3)">No receipts yet.</td></tr>'; return; }
-  tbody.innerHTML = rows.slice().reverse().map(r => {
+  // Sort per dropdown (default newest first)
+  const _rcSort = document.getElementById('rc-sort')?.value || 'date-desc';
+  rows = rows.slice().sort((a,b) => {
+    if (_rcSort === 'date-asc')     return (a.date||'').localeCompare(b.date||'');
+    if (_rcSort === 'date-desc')    return (b.date||'').localeCompare(a.date||'');
+    if (_rcSort === 'amount-desc')  return parseFloat(b.amount||0) - parseFloat(a.amount||0);
+    if (_rcSort === 'amount-asc')   return parseFloat(a.amount||0) - parseFloat(b.amount||0);
+    if (_rcSort === 'client-asc')   return (a.client_name||'').localeCompare(b.client_name||'');
+    if (_rcSort === 'ref-desc')     return (b.receipt_id||'').localeCompare(a.receipt_id||'');
+    return 0;
+  });
+  tbody.innerHTML = rows.map(r => {
     const acct = r.payment_account === 'drawings'
       ? '<span class="badge badge-purple">Drawings</span>'
       : '<span class="badge badge-blue">Bank</span>';
@@ -2954,7 +3110,19 @@ async function saveReceipt() {
 function renderVoucherRows(rows) {
   const tbody = document.getElementById('voucher-tbody');
   if (!rows.length) { tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--text3)">No payment vouchers yet.</td></tr>'; return; }
-  tbody.innerHTML = rows.slice().reverse().map(v => {
+  // Sort per dropdown
+  const _pvSort = document.getElementById('pv-sort')?.value || 'date-desc';
+  rows = rows.slice().sort((a,b) => {
+    if (_pvSort === 'date-asc')      return (a.date||'').localeCompare(b.date||'');
+    if (_pvSort === 'date-desc')     return (b.date||'').localeCompare(a.date||'');
+    if (_pvSort === 'amount-desc')   return parseFloat(b.amount||0) - parseFloat(a.amount||0);
+    if (_pvSort === 'amount-asc')    return parseFloat(a.amount||0) - parseFloat(b.amount||0);
+    if (_pvSort === 'payee-asc')     return (a.payee||'').localeCompare(b.payee||'');
+    if (_pvSort === 'category-asc')  return (a.category||'').localeCompare(b.category||'');
+    if (_pvSort === 'ref-desc')      return (b.voucher_id||'').localeCompare(a.voucher_id||'');
+    return 0;
+  });
+  tbody.innerHTML = rows.map(v => {
     const acct = v.payment_account === 'drawings'
       ? '<span class="badge badge-purple">Drawings</span>'
       : '<span class="badge badge-blue">Bank</span>';
@@ -3285,13 +3453,26 @@ function buildGLFromCache() {
     });
   });
 
-  // Vouchers → Dr Expense / Cr Bank or Drawings
+  // Build voucher.category → COA expense account name lookup
+  const __catToExpAcct = {};
+  __coa.filter(a => {
+    const sec = COA_SECTIONS[a.section]||{};
+    return sec.statement === 'PL' && sec.side === 'expense';
+  }).forEach(a => {
+    if (!a.mapsFrom) return;
+    a.mapsFrom.forEach(t => {
+      const k = (t||'').toLowerCase();
+      __catToExpAcct[k] = `${a.code} ${a.name}`;
+    });
+  });
+
+  // Vouchers → Dr [specific COA expense account] / Cr Bank or Drawings
   (VOUCHERS || []).forEach(v => {
     const amt = parseFloat(v.amount||0);
     if (!amt) return;
     const isDrawings = v.payment_account === 'drawings';
-    const cat = (v.category||'general').toLowerCase();
-    const drAcct = CAT_DR[cat] || CAT_DR.general;
+    const cat = (v.category||'').toLowerCase();
+    const drAcct = __catToExpAcct[cat] || CAT_DR[cat] || (cat ? `Expense — ${v.category}` : 'Expense (Unmapped)');
     rows.push({
       date: v.date || '',
       ref: v.voucher_no || '',
@@ -3467,8 +3648,7 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
             <th style="width:90px">Ref</th>
             <th>Description</th>
             <th style="width:60px">Type</th>
-            <th style="text-align:right;width:120px">Amount (RM)</th>
-            <th style="text-align:right;width:130px">Running (RM)</th>
+            <th style="text-align:right;width:140px">Amount (RM)</th>
           </tr>
         </thead>
         <tbody id="drill-tbody"></tbody>
@@ -3678,31 +3858,47 @@ function populateGLAccountFilter() {
 }
 
 function sortAndRenderGL() {
-  renderGLRows(GL_ALL_ROWS);
+  const filter = document.getElementById('gl-filter-account')?.value || '';
+  if (filter) { filterGLByAccount(); }
+  else { renderGLRows(GL_ALL_ROWS); }
 }
 
 function renderGLRows(rows) {
   const tbody  = document.getElementById('gl-tbody');
-  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--text3)">No entries.</td></tr>'; return; }
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text3)">No entries.</td></tr>'; return; }
   const sort = document.getElementById('gl-sort')?.value || 'date-desc';
 
-  // Detect if user filtered by a specific account (filter value starts with 'acct:')
   const acctFilterRaw = (document.getElementById('gl-filter-account')?.value || '');
   const accountFilter = acctFilterRaw.startsWith('acct:') ? acctFilterRaw.slice(5).toLowerCase() : null;
 
-  // For running-balance display we always need ascending date order
-  const sortedAsc = rows.slice().sort((a,b) => (a.date||'').localeCompare(b.date||''));
-
-  // Lookup B/F if account filter is active
-  let bfAmount = 0;
-  let bfRowHtml = '';
+  // Determine natural side for the filtered account
+  let drNatural = true;
   if (accountFilter) {
-    // Match COA account by name (case-insensitive on full account name only — code prefix is OK to ignore for B/F)
     try {
       const coa = getCOA();
       const acct = coa.find(a => {
-        const full = `${a.code||''} ${a.name||''}`.toLowerCase();
-        return full === accountFilter || (a.name||'').toLowerCase() === accountFilter;
+        const full = (a.code||'') + ' ' + (a.name||'');
+        return full.toLowerCase() === accountFilter || (a.name||'').toLowerCase() === accountFilter;
+      });
+      if (acct) {
+        const isDrawings = /drawing/i.test(acct.name||'') || acct.code === '3300';
+        const drSections = ['non_current_asset','current_asset','direct_cost','admin_expense','depreciation'];
+        drNatural = drSections.includes(acct.section) || isDrawings;
+      } else if (/revenue|income|capital|retain|liability|payable/i.test(accountFilter)) {
+        drNatural = false;
+      }
+    } catch(e) {}
+  }
+
+  // B/F row when account-filtered
+  let bfAmount = 0;
+  let bfRowHtml = '';
+  if (accountFilter) {
+    try {
+      const coa = getCOA();
+      const acct = coa.find(a => {
+        const full = (a.code||'') + ' ' + (a.name||'');
+        return full.toLowerCase() === accountFilter || (a.name||'').toLowerCase() === accountFilter;
       });
       if (acct) {
         const ob = COA_OPENING_BALANCES[acct.code];
@@ -3711,81 +3907,28 @@ function renderGLRows(rows) {
           bfRowHtml = `<tr style="background:var(--surface2)">
             <td style="font-size:12px;color:var(--text2)">${formatDate(ob.date)}</td>
             <td style="font-family:'DM Mono',monospace;font-size:12px">B/F</td>
-            <td style="font-size:12px;font-style:italic">Balance b/f — ${ob.note}</td>
-            <td></td><td></td>
-            <td style="font-family:'DM Mono',monospace;font-size:13px;text-align:right;color:var(--text2)">—</td>
+            <td style="font-size:12px;font-style:italic" colspan="3">Balance b/f — ${ob.note}</td>
             <td style="font-family:'DM Mono',monospace;font-size:13px;text-align:right;font-weight:600">RM ${bfAmount.toLocaleString('en-MY',{minimumFractionDigits:2})}</td>
             <td><span style="font-size:10px;color:var(--text3)">opening</span></td>
           </tr>`;
         }
       }
-    } catch(e) { console.warn('B/F lookup failed', e); }
-  }
-
-  // Determine the natural side for the filtered account so the running balance
-  // displays with the user-friendly sign (DR-natural = positive when debited;
-  // CR-natural = positive when credited).
-  // DR-natural: assets, expenses, direct cost, depreciation, drawings (equity drawings sub)
-  // CR-natural: revenue, other income, liabilities, equity (capital, retained, profit)
-  let drNatural = true;
-  if (accountFilter) {
-    try {
-      const coa = getCOA();
-      const acct = coa.find(a => {
-        const full = `${a.code||''} ${a.name||''}`.toLowerCase();
-        return full === accountFilter || (a.name||'').toLowerCase() === accountFilter;
-      });
-      if (acct) {
-        const sec = COA_SECTIONS[acct.section] || {};
-        const isDrawings = /drawing/i.test(acct.name||'') || acct.code === '3300';
-        // DR-natural sections: assets and expenses
-        const drSections = ['non_current_asset','current_asset','direct_cost','admin_expense','depreciation'];
-        drNatural = drSections.includes(acct.section) || isDrawings;
-      } else {
-        // No COA match — guess from name
-        if (/revenue|income|capital|retain|liability|payable|accru/i.test(accountFilter)) drNatural = false;
-      }
     } catch(e) {}
   }
 
-  // Build row HTML in ASC order with running balance, then re-sort if needed for display
-  let running = bfAmount;
-  const augmented = sortedAsc.map(g => {
-    let delta = 0;
-    if (accountFilter) {
-      const dr = (g.dr_account||'').toLowerCase();
-      const cr = (g.cr_account||'').toLowerCase();
-      const amt = parseFloat(g.amount||0);
-      // Sign convention adapts to natural side of the account
-      if (drNatural) {
-        if (dr === accountFilter) delta += amt;
-        if (cr === accountFilter) delta -= amt;
-      } else {
-        // CR-natural: credits increase the balance, debits decrease
-        if (cr === accountFilter) delta += amt;
-        if (dr === accountFilter) delta -= amt;
-      }
-      running += delta;
-    }
-    return { g, delta, running };
-  });
-
-  // For display: respect the chosen sort direction
-  let display = augmented;
-  if (sort === 'date-desc')         display = augmented.slice().reverse();
-  else if (sort === 'account-asc')  display = augmented.slice().sort((a,b) => (a.g.dr_account||'').localeCompare(b.g.dr_account||''));
-  else if (sort === 'amount-desc')  display = augmented.slice().sort((a,b) => parseFloat(b.g.amount||0) - parseFloat(a.g.amount||0));
+  const sortedAsc = rows.slice().sort((a,b) => (a.date||'').localeCompare(b.date||''));
+  let display = sortedAsc;
+  if (sort === 'date-desc')         display = sortedAsc.slice().reverse();
+  else if (sort === 'account-asc')  display = sortedAsc.slice().sort((a,b) => (a.dr_account||'').localeCompare(b.dr_account||''));
+  else if (sort === 'amount-desc')  display = sortedAsc.slice().sort((a,b) => parseFloat(b.amount||0) - parseFloat(a.amount||0));
 
   const fmt = n => parseFloat(n||0).toLocaleString('en-MY',{minimumFractionDigits:2,maximumFractionDigits:2});
 
-  const bodyRows = display.map(({g, delta, running:r}) => {
+  const bodyRows = display.map(g => {
     const isJournal = g.source_type === 'journal';
     const editBtn   = isJournal
       ? `<button class="btn btn-ghost btn-sm" onclick="openGLEditById('${(g.gl_id||g.id||'').toString().replace(/'/g,'')}')">Edit</button>`
       : `<span style="font-size:10px;color:var(--text3)">${g.source_type||''}</span>`;
-    const runCell = accountFilter
-      ? `<td style="font-family:'DM Mono',monospace;font-size:12px;text-align:right;color:var(--text2)">RM ${fmt(r)}</td>`
-      : `<td style="text-align:right;color:var(--text3)">—</td>`;
     return `<tr>
       <td style="font-size:12px;color:var(--text2)">${formatDate(g.date)}</td>
       <td style="font-family:'DM Mono',monospace;font-size:12px">${g.ref||'—'}</td>
@@ -3793,31 +3936,35 @@ function renderGLRows(rows) {
       <td><span class="gl-dr">${g.dr_code ? g.dr_code+' ' : ''}${g.dr_account||''}</span></td>
       <td><span class="gl-cr">${g.cr_code ? g.cr_code+' ' : ''}${g.cr_account||''}</span></td>
       <td style="font-family:'DM Mono',monospace;font-size:13px;text-align:right">RM ${fmt(g.amount)}</td>
-      ${runCell}
       <td>${editBtn}</td>
     </tr>`;
   }).join('');
 
-  // Total row (only when account-filtered): closing balance + sum of debits/credits
+  // Total row
   let totalRowHtml = '';
-  if (accountFilter && augmented.length) {
-    const closing = augmented.length ? augmented[augmented.length-1].running : bfAmount;
+  if (accountFilter && rows.length) {
     let totalDr = 0, totalCr = 0;
-    augmented.forEach(({g}) => {
+    rows.forEach(g => {
       const dr = (g.dr_account||'').toLowerCase();
       const cr = (g.cr_account||'').toLowerCase();
       const amt = parseFloat(g.amount||0);
       if (dr === accountFilter) totalDr += amt;
       if (cr === accountFilter) totalCr += amt;
     });
+    const closing = drNatural ? bfAmount + totalDr - totalCr : bfAmount + totalCr - totalDr;
     const formula = drNatural
-      ? `B/F + DR ${fmt(totalDr)} − CR ${fmt(totalCr)}`
-      : `B/F + CR ${fmt(totalCr)} − DR ${fmt(totalDr)}`;
+      ? `B/F ${fmt(bfAmount)} + DR ${fmt(totalDr)} − CR ${fmt(totalCr)}`
+      : `B/F ${fmt(bfAmount)} + CR ${fmt(totalCr)} − DR ${fmt(totalDr)}`;
     totalRowHtml = `<tr style="background:var(--accent);color:#fff;font-weight:600">
-      <td colspan="3" style="font-size:12px;padding:10px 12px">Closing balance (${formula})</td>
-      <td></td><td></td>
-      <td style="font-family:'DM Mono',monospace;font-size:13px;text-align:right">—</td>
+      <td colspan="5" style="font-size:12px;padding:10px 12px">Closing balance (${formula})</td>
       <td style="font-family:'DM Mono',monospace;font-size:13px;text-align:right">RM ${fmt(closing)}</td>
+      <td></td>
+    </tr>`;
+  } else if (rows.length) {
+    const totalAmt = rows.reduce((s, g) => s + parseFloat(g.amount||0), 0);
+    totalRowHtml = `<tr style="background:var(--surface2);font-weight:600">
+      <td colspan="5" style="font-size:12px;padding:10px 12px">Total — ${rows.length} entries</td>
+      <td style="font-family:'DM Mono',monospace;font-size:13px;text-align:right">RM ${fmt(totalAmt)}</td>
       <td></td>
     </tr>`;
   }
