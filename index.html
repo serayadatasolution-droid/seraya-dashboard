@@ -1124,6 +1124,96 @@ function showApp() {
   loadInvoices();
   loadAllocations();
   loadSettings();
+  prefetchGlobals();
+}
+
+// Silently pre-load VOUCHERS and RECEIPTS so reports can use cached data
+async function prefetchGlobals() {
+  if (!VOUCHERS.length) {
+    const r = await api({action:'get_vouchers'});
+    if (r.ok) VOUCHERS = (r.data||[]).filter(v => !isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__'));
+  }
+  if (!RECEIPTS.length) {
+    const r = await api({action:'get_receipts'});
+    if (r.ok) RECEIPTS = (r.data||[]).filter(r => !isDeleted('receipts',(r.receipt_id||r.id||'').toString()) && !(r.notes||'').startsWith('__VOID__'));
+  }
+}
+
+// Retention Recon page
+async function loadRetention() {
+  const fmt  = n => 'RM ' + parseFloat(Math.abs(n)||0).toLocaleString('en-MY',{minimumFractionDigits:2});
+  const fmtS = (n, neg) => neg
+    ? `<span style="color:var(--red)">− ${fmt(n)}</span>`
+    : fmt(n);
+
+  // Use cached allocations; fetch if empty
+  const allocs = ALLOCATIONS.length ? ALLOCATIONS
+    : ((await api({action:'get_allocations'})).data || []);
+
+  // ── Pool: admin_retain + abot_cost per allocation ──
+  const poolRows = allocs
+    .map(a => ({
+      inv_no:   a.inv_no,
+      client:   (INVOICES.find(i => i.inv_no === a.inv_no)||{}).client_name || a.inv_no || '—',
+      adminRet: parseFloat(a.admin_retain||0),
+      abotCost: parseFloat(a.abot_cost||0),
+      total:    r2(parseFloat(a.admin_retain||0) + parseFloat(a.abot_cost||0)),
+    }))
+    .filter(r => r.total > 0)
+    .sort((a,b) => (a.inv_no||'').localeCompare(b.inv_no||''));
+
+  const poolTotal = r2(poolRows.reduce((s,r) => s + r.total, 0));
+
+  // ── Hardcoded deductions (matched to GL 2026) ──
+  const DEDUCTIONS = [
+    { label: '2025 operating expenses',           amount: 537.25,  note: 'GL 2025' },
+    { label: '2025 dividend paid',                amount: 1000.00, note: 'GL 2025' },
+    { label: 'Abot software subscription (2025)', amount: 2700.00, note: 'GL 2025' },
+    { label: '6ixteen courier charges',           amount: 32.40,   note: 'PV004.26' },
+    { label: 'Lunch at Onya',                     amount: 91.60,   note: 'GL 2026' },
+    { label: 'Raya Hamper for Ahmad (FRAZ)',      amount: 93.38,   note: 'PV006.26' },
+    { label: 'Raya Hamper for Ain (Freelance)',   amount: 93.38,   note: 'PV007.26' },
+    { label: 'Dividend paid — March 2026',        amount: 500.00,  note: 'GL 2026' },
+    { label: 'Rounding adjustment',               amount: 2.53,    note: 'GL 2026' },
+  ];
+  const totalDeducted = r2(DEDUCTIONS.reduce((s,d) => s + d.amount, 0));
+  const GL_BALANCE    = 4191.64;
+  const computedBal   = r2(poolTotal - totalDeducted);
+  const variance      = r2(computedBal - GL_BALANCE);
+
+  // ── Render metrics ──
+  document.getElementById('ret-pool-total').textContent   = fmt(poolTotal);
+  document.getElementById('ret-deducted').textContent     = fmt(totalDeducted);
+  document.getElementById('ret-balance').textContent      = fmt(computedBal);
+  document.getElementById('ret-variance-badge').textContent = (variance === 0 ? 'Nil' : fmt(Math.abs(variance)));
+  document.getElementById('ret-variance-badge').style.color = variance === 0 ? 'var(--green)' : 'var(--amber)';
+
+  // ── Pool rows ──
+  document.getElementById('ret-pool-rows').innerHTML = poolRows.map(r => `
+    <div class="fin-row indent">
+      <span style="font-size:12px">${r.inv_no} — ${r.client}</span>
+      <span class="fin-amt" style="font-family:'DM Mono',monospace;font-size:12px">${fmt(r.total)}</span>
+    </div>`).join('') +
+    `<div class="fin-row subtotal"><span>Total Pool</span><span class="fin-amt">${fmt(poolTotal)}</span></div>`;
+
+  // ── Deduction rows ──
+  document.getElementById('ret-abot-rows').innerHTML = DEDUCTIONS.map(d => `
+    <div class="fin-row indent">
+      <span style="font-size:12px">${d.label}<span style="color:var(--text3);margin-left:6px;font-size:11px">${d.note}</span></span>
+      <span class="fin-amt fin-neg" style="font-family:'DM Mono',monospace;font-size:12px">(${fmt(d.amount)})</span>
+    </div>`).join('') +
+    `<div class="fin-row subtotal"><span>Total Deductions</span><span class="fin-amt fin-neg">(${fmt(totalDeducted)})</span></div>`;
+
+  // ── Reconciliation summary ──
+  document.getElementById('ret-variance-rows').innerHTML = `
+    <div class="fin-row indent"><span>Pool collected</span><span class="fin-amt">${fmt(poolTotal)}</span></div>
+    <div class="fin-row indent"><span>Less: deductions</span><span class="fin-amt fin-neg">(${fmt(totalDeducted)})</span></div>
+    <div class="fin-row subtotal"><span>Computed balance</span><span class="fin-amt">${fmt(computedBal)}</span></div>
+    <div class="fin-row indent"><span>GL balance (per books)</span><span class="fin-amt">${fmt(GL_BALANCE)}</span></div>
+    <div class="fin-row total" style="color:${variance===0?'var(--green)':'var(--amber)'}">
+      <span>Unreconciled variance</span>
+      <span class="fin-amt">${variance === 0 ? 'Nil ✓' : (variance > 0 ? '+ ' : '− ') + fmt(Math.abs(variance))}</span>
+    </div>`;
 }
 
 // ══════════════════════════════════════════════════
@@ -2989,26 +3079,19 @@ const IS_EXP_ORDER = ['Soleprop wages','Subcon charges TXY 1','Subcon charges IV
 async function loadIncomeStatement() {
   document.getElementById('is-table').innerHTML = '<div style="padding:20px;color:var(--text3)">Loading…</div>';
   const year = document.getElementById('is-filter-year').value;
-  const [invRes, vRes] = await Promise.all([api({action:'get_invoices'}), api({action:'get_vouchers'})]);
-  if (!invRes.ok) {
-    document.getElementById('is-table').innerHTML = `<div style="padding:20px;color:var(--red)">Failed to load: ${invRes.error||'invoices error'}</div>`;
-    return;
-  }
-  if (!vRes.ok) {
-    document.getElementById('is-table').innerHTML = `<div style="padding:20px;color:var(--red)">Failed to load: ${vRes.error||'vouchers error'}</div>`;
-    return;
-  }
-
+  // Use cached globals — avoids concurrent JSONP timeout issues
+  const invoicesAll = INVOICES.length ? INVOICES : (await api({action:'get_invoices'})).data || [];
+  const vouchersAll = VOUCHERS.length ? VOUCHERS : (await api({action:'get_vouchers'})).data || [];
   // Populate year filter if empty
   const yearSel = document.getElementById('is-filter-year');
   if (yearSel.options.length <= 1) {
-    const years = [...new Set(invRes.data.map(i=>(i.inv_date||i.date||'').slice(0,4)).filter(Boolean))].sort().reverse();
+    const years = [...new Set(invoicesAll.map(i=>(i.inv_date||i.date||'').slice(0,4)).filter(Boolean))].sort().reverse();
     years.forEach(y => { const o = document.createElement('option'); o.value=y; o.textContent=y; yearSel.appendChild(o); });
   }
 
   const filterYear = y => !year || (y||'').startsWith(year);
-  const invoices = invRes.data.filter(i => i.status !== 'cancelled' && filterYear(i.inv_date||i.date||''));
-  const vouchers = vRes.data.filter(v => filterYear(v.date||'') && (!isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__')));
+  const invoices = invoicesAll.filter(i => i.status !== 'cancelled' && filterYear(i.inv_date||i.date||''));
+  const vouchers = vouchersAll.filter(v => filterYear(v.date||'') && !isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__'));
 
   const revenue  = invoices.reduce((s,i) => s + parseFloat(i.amount||0) + parseFloat(i.disb_amount||0), 0);
   const totalExp = vouchers.reduce((s,v) => s + parseFloat(v.amount||0), 0);
@@ -3060,18 +3143,12 @@ async function loadIncomeStatement() {
 // ══ BALANCE SHEET ══
 async function loadBalanceSheet() {
   document.getElementById('bs-assets').innerHTML = '<div style="padding:20px;color:var(--text3)">Loading…</div>';
-  const [invRes, rcRes, vRes, glRes] = await Promise.all([
-    api({action:'get_invoices'}), api({action:'get_receipts'}),
-    api({action:'get_vouchers'}), api({action:'get_gl', filters:{}})
-  ]);
-  if (!invRes.ok) {
-    document.getElementById('bs-assets').innerHTML = `<div style="padding:20px;color:var(--red)">Failed to load: ${invRes.error||'invoices error'}</div>`;
-    return;
-  }
+  // Use cached globals for invoices/receipts/vouchers; only fetch GL fresh (not cached globally)
+  const glRes = await api({action:'get_gl', filters:{}});
 
-  const invoices  = invRes.data.filter(i => i.status !== 'cancelled');
-  const receipts  = (rcRes.ok ? rcRes.data : []).filter(r => (!isDeleted('receipts',(r.receipt_id||r.id||'').toString()) && !(r.notes||'').startsWith('__VOID__')));
-  const vouchers  = (vRes.ok  ? vRes.data  : []).filter(v => (!isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__')));
+  const invoices  = (INVOICES.length ? INVOICES : []).filter(i => i.status !== 'cancelled');
+  const receipts  = RECEIPTS.length ? RECEIPTS : [];  // already filtered by loadReceipts
+  const vouchers  = VOUCHERS.length ? VOUCHERS : [];  // already filtered by loadVouchers
   const glEntries = glRes.ok ? glRes.data : [];
 
   // ── Opening balances (per Excel GL 1/1/2026) ──
@@ -3199,10 +3276,10 @@ async function loadBalanceSheet() {
 async function loadSalesAnalysis() {
   const year   = document.getElementById('sa-filter-year').value;
   const biller = document.getElementById('sa-filter-biller').value;
-  const res = await api({action:'get_invoices'});
-  if (!res.ok) return;
+  // Use cached INVOICES — avoids extra API call
+  const allInv = INVOICES.length ? INVOICES : ((await api({action:'get_invoices'})).data || []);
 
-  let data = res.data.filter(i => i.status !== 'cancelled');
+  let data = allInv.filter(i => i.status !== 'cancelled');
   if (year)   data = data.filter(i => (i.inv_date||i.date||'').startsWith(year));
   if (biller) data = data.filter(i => i.billing_party === biller);
 
@@ -3274,34 +3351,30 @@ async function loadAging() {
   const fmt   = n => 'RM ' + parseFloat(n||0).toLocaleString('en-MY',{minimumFractionDigits:2});
   const buckets = {current:0, d30:0, d60:0, d90:0, d120:0, d365:0};
 
-  // Always fetch fresh — avoids stale cache issues
-  const [invRes, rcRes] = await Promise.all([
-    api({action:'get_invoices'}),
-    api({action:'get_receipts'}),
-  ]);
+  // Use cached globals — avoids concurrent JSONP timeout issues
+  const allInvoices = INVOICES.length ? INVOICES : ((await api({action:'get_invoices'})).data || []);
+  const allReceipts = RECEIPTS.length ? RECEIPTS : ((await api({action:'get_receipts'})).data || [])
+    .filter(r => !isDeleted('receipts',(r.receipt_id||r.id||'').toString()) && !(r.notes||'').startsWith('__VOID__'));
 
-  if (!invRes.ok) {
-    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--red)">Failed to load invoices: ${invRes.error||'unknown error'}</td></tr>`;
+  if (!allInvoices.length && !INVOICES.length) {
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--red)">Failed to load invoices</td></tr>`;
     return;
   }
 
   // Build paid map (exclude deleted/voided receipts)
   const rcPaidMap = {};
-  (rcRes.ok ? rcRes.data || [] : [])
-    .filter(r => !isDeleted('receipts',(r.receipt_id||r.id||'').toString()) && !(r.notes||'').startsWith('__VOID__'))
-    .forEach(r => {
-      if (r.inv_no) rcPaidMap[r.inv_no] = r2((rcPaidMap[r.inv_no]||0) + parseFloat(r.amount||0));
-    });
+  allReceipts.forEach(r => {
+    if (r.inv_no) rcPaidMap[r.inv_no] = r2((rcPaidMap[r.inv_no]||0) + parseFloat(r.amount||0));
+  });
 
-  const allInvoices  = invRes.data || [];
-  const outstanding  = allInvoices.filter(i => i.status === 'outstanding' || i.status === 'partial');
+  const outstanding = allInvoices.filter(i => i.status === 'outstanding' || i.status === 'partial');
 
   if (!outstanding.length) {
     // Show diagnostic: total invoices vs outstanding so we can see what's happening
     ['ag-current','ag-30','ag-60','ag-90','ag-120','ag-365'].forEach(id => {
       document.getElementById(id).textContent = fmt(0);
     });
-    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text3)">No outstanding debtors. (${allInvoices.length} invoices total)</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text3)">No outstanding debtors. (${allInvoices.length} total invoices loaded)</td></tr>`;
     return;
   }
 
