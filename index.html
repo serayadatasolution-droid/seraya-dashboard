@@ -4140,8 +4140,8 @@ function populateGLAccountFilter() {
   // Collect distinct names + counts/sums from current GL_ALL_ROWS
   const acctMap = {};   // name -> {count, total}
   (GL_ALL_ROWS||[]).forEach(g => {
-    const dr = (g.dr_account||'').trim();
-    const cr = (g.cr_account||'').trim();
+    const dr = ((g.dr_code||'').trim() ? g.dr_code.trim()+' ' : '') + (g.dr_account||'').trim();
+    const cr = ((g.cr_code||'').trim() ? g.cr_code.trim()+' ' : '') + (g.cr_account||'').trim();
     const amt = parseFloat(g.amount||0);
     [dr, cr].forEach(n => {
       if (!n) return;
@@ -4192,15 +4192,18 @@ function populateGLAccountFilter() {
 }
 
 function sortAndRenderGL() {
+  if (GL_ALL_ROWS.some(e => (e.source_type||'') !== 'journal')) {
+    const j = GL_ALL_ROWS.filter(e => (e.source_type||'') === 'journal');
+    GL_ALL_ROWS.length = 0; j.forEach(e => GL_ALL_ROWS.push(e));
+  }
   const filter = document.getElementById('gl-filter-account')?.value || '';
   if (filter) { filterGLByAccount(); }
   else { renderGLRows(GL_ALL_ROWS); }
 }
-
 function renderGLRows(rows) {
-  const tbody  = document.getElementById('gl-tbody');
+  const tbody = document.getElementById('gl-tbody');
   if (!rows.length) {
-    const acctFilter = (document.getElementById('gl-filter-account')?.value||'');
+  const acctFilter = (document.getElementById('gl-filter-account')?.value||'');
     const msg = acctFilter.startsWith('acct:')
       ? `No entries for "${acctFilter.slice(5)}" in the current view.<br><span style="font-size:12px">If you expected entries, check the period filter, or verify the COA account's "maps from" tokens match your voucher categories / invoice job_types.</span>`
       : 'No entries.';
