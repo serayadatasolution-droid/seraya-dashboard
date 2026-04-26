@@ -1119,12 +1119,18 @@ function showLogin() {
 function showApp() {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app').style.display = 'block';
-  loadDashboard();
-  loadClients();
-  loadInvoices();
-  loadAllocations();
-  loadSettings();
-  prefetchGlobals();
+  // Load sequentially to avoid overwhelming the JSONP backend with concurrent requests
+  loadStartupSequence();
+}
+
+async function loadStartupSequence() {
+  await loadSettings();
+  await loadInvoices();
+  await loadAllocations();
+  await loadClients();
+  await loadDashboard();
+  // Prefetch vouchers + receipts into cache after core data is ready
+  await prefetchGlobals();
 }
 
 // Silently pre-load VOUCHERS and RECEIPTS so reports can use cached data
@@ -1280,18 +1286,19 @@ function getSetting(key, def) {
 // DASHBOARD
 // ══════════════════════════════════════════════════
 async function loadDashboard() {
-  const [summaryRes, rcRes, pvRes] = await Promise.all([
-    api({ action: 'dashboard_summary' }),
-    api({ action: 'get_receipts' }),
-    api({ action: 'get_vouchers' }),
-  ]);
+  // Sequential fetches — avoid concurrent JSONP timeouts
+  const summaryRes = await api({ action: 'dashboard_summary' });
   if (!summaryRes.ok) return;
+  const rcRes = await api({ action: 'get_receipts' });
+
   const d = summaryRes.data;
   const fmt = n => 'RM ' + parseFloat(n || 0).toLocaleString('en-MY', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   // ── Build paid-amount map from receipts (inv_no → total received), excluding voided ──
   const receipts = (rcRes.ok ? rcRes.data : []).filter(r => (!isDeleted('receipts',(r.receipt_id||r.id||'').toString()) && !(r.notes||'').startsWith('__VOID__')));
-  const vouchers = (pvRes.ok ? pvRes.data : []).filter(v => (!isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__')));
+  // Use cached VOUCHERS for bank balance (populated by prefetchGlobals after startup)
+  const vouchers = VOUCHERS.length ? VOUCHERS
+    : (rcRes.ok ? [] : []);  // fallback to empty if not yet loaded
   const paidMap = {};  // inv_no → total paid
   receipts.forEach(r => {
     if (r.inv_no) paidMap[r.inv_no] = r2((paidMap[r.inv_no] || 0) + parseFloat(r.amount || 0));
@@ -2759,9 +2766,13 @@ async function saveVoucher() {
 async function loadGL() {
   const month  = document.getElementById('gl-filter-month').value;
   const source = document.getElementById('gl-filter-source').value;
+  document.getElementById('gl-tbody').innerHTML = '<tr class="loading-row"><td colspan="7">Loading GL…</td></tr>';
   const res = await api({ action: 'get_gl', filters: { month, source_type: source } });
-  if (!res.ok) return;
-  GL_ALL_ROWS = res.data;
+  if (!res.ok) {
+    document.getElementById('gl-tbody').innerHTML = `<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--red)">GL not available: ${res.error||'action not supported by backend'}</td></tr>`;
+    return;
+  }
+  GL_ALL_ROWS = res.data || [];
 
   // Populate month filter from data (once)
   const monthSel = document.getElementById('gl-filter-month');
