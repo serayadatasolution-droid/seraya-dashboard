@@ -2763,21 +2763,110 @@ async function saveVoucher() {
 // ══════════════════════════════════════════════════
 // GENERAL LEDGER
 // ══════════════════════════════════════════════════
+// Build GL rows client-side from cached INVOICES / RECEIPTS / VOUCHERS
+// No backend get_gl call needed — avoids timeout on unsupported action
+function buildGLFromCache() {
+  const CAT_DR = {
+    wages_ho:     'Wages — Ho / W / KC',
+    wages_txy:    'Wages — TXY / Koay',
+    wages_et:     'Wages — ET / QET',
+    wages_ivy:    'Wages — Ivy',
+    wages_cecilia:'Wages — Cecilia',
+    software:     'Software Subscription',
+    courier:      'Courier & Postage',
+    meals:        'Meals & Entertainment',
+    hamper:       'Staff Welfare',
+    dividend:     'Dividend / Drawings',
+    ssm:          'SSM Filing Fees',
+    general:      'General Expenses',
+    other:        'Other Expenses',
+  };
+
+  const rows = [];
+
+  // Invoices → Dr Trade Debtors / Cr Revenue
+  (INVOICES || []).forEach(i => {
+    const amt = r2(parseFloat(i.amount||0) + parseFloat(i.disb_amount||0));
+    if (!amt) return;
+    rows.push({
+      date: i.date || i.inv_date || '',
+      ref: i.inv_no || '',
+      description: `${i.client_name||''} — ${i.job_type||''}`,
+      dr_account: 'Trade Debtors',
+      cr_account: 'Revenue',
+      amount: amt,
+      source_type: 'invoice',
+      id: 'inv_' + i.inv_id,
+    });
+  });
+
+  // Receipts → Dr Bank or Drawings / Cr Trade Debtors
+  (RECEIPTS || []).forEach(rc => {
+    const amt = parseFloat(rc.amount||0);
+    if (!amt) return;
+    const isDrawings = rc.payment_account === 'drawings';
+    rows.push({
+      date: rc.date || '',
+      ref: rc.inv_no || '',
+      description: `Receipt — ${rc.client_name||rc.inv_no||''}`,
+      dr_account: isDrawings ? 'Drawings Account' : 'CIMB Bank 8606183963',
+      cr_account: 'Trade Debtors',
+      amount: amt,
+      source_type: 'receipt',
+      id: 'rc_' + rc.receipt_id,
+    });
+  });
+
+  // Vouchers → Dr Expense / Cr Bank or Drawings
+  (VOUCHERS || []).forEach(v => {
+    const amt = parseFloat(v.amount||0);
+    if (!amt) return;
+    const isDrawings = v.payment_account === 'drawings';
+    const cat = (v.category||'general').toLowerCase();
+    const drAcct = CAT_DR[cat] || CAT_DR.general;
+    rows.push({
+      date: v.date || '',
+      ref: v.voucher_no || '',
+      description: v.description || `Payment to ${v.payee||''}`,
+      dr_account: drAcct,
+      cr_account: isDrawings ? 'Drawings Account' : 'CIMB Bank 8606183963',
+      amount: amt,
+      source_type: 'voucher',
+      id: 'pv_' + v.voucher_id,
+    });
+  });
+
+  return rows.sort((a,b) => (b.date||'').localeCompare(a.date||''));
+}
+
 async function loadGL() {
   const month  = document.getElementById('gl-filter-month').value;
   const source = document.getElementById('gl-filter-source').value;
   document.getElementById('gl-tbody').innerHTML = '<tr class="loading-row"><td colspan="7">Loading GL…</td></tr>';
-  const res = await api({ action: 'get_gl', filters: { month, source_type: source } });
-  if (!res.ok) {
-    document.getElementById('gl-tbody').innerHTML = `<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--red)">GL not available: ${res.error||'action not supported by backend'}</td></tr>`;
-    return;
-  }
-  GL_ALL_ROWS = res.data || [];
+
+  // Ensure caches are populated
+  if (!INVOICES.length) await loadInvoices();
+  if (!RECEIPTS.length) await prefetchGlobals();
+  if (!VOUCHERS.length) await prefetchGlobals();
+
+  // Build GL from cache
+  let rows = buildGLFromCache();
+
+  // Apply filters
+  if (month)  rows = rows.filter(g => (g.date||'').startsWith(month));
+  if (source) rows = rows.filter(g => g.source_type === source);
+
+  const acctFilter = document.getElementById('gl-filter-account').value;
+  if (acctFilter === 'expense') rows = rows.filter(g => g.source_type === 'voucher');
+  if (acctFilter === 'income')  rows = rows.filter(g => g.source_type === 'invoice');
+
+  GL_ALL_ROWS = rows;
 
   // Populate month filter from data (once)
   const monthSel = document.getElementById('gl-filter-month');
-  if (monthSel.options.length <= 1 && GL_ALL_ROWS.length) {
-    const months = [...new Set(GL_ALL_ROWS.map(g=>(g.date||'').slice(0,7)).filter(Boolean))].sort().reverse();
+  if (monthSel.options.length <= 1 && rows.length) {
+    const allRows = buildGLFromCache();
+    const months = [...new Set(allRows.map(g=>(g.date||'').slice(0,7)).filter(Boolean))].sort().reverse();
     months.forEach(m => {
       const o = document.createElement('option'); o.value = m;
       const [yr,mo] = m.split('-');
@@ -2787,7 +2876,6 @@ async function loadGL() {
   }
 
   renderGLRows(GL_ALL_ROWS);
-  document.getElementById('gl-filter-account').value = '';
 }
 
 // ══════════════════════════════════════════════════
