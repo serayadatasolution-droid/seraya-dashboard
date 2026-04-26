@@ -3535,6 +3535,7 @@ async function saveVoucher() {
 // Build GL rows client-side from cached INVOICES / RECEIPTS / VOUCHERS
 // No backend get_gl call needed — avoids timeout on unsupported action
 function buildGLFromCache() {
+  if ((GL_ALL_ROWS||[]).some(e => (e.source_type||'') === 'journal')) return [];
   const CAT_DR = {
     wages_ho:     'Wages — Ho / W / KC',
     wages_txy:    'Wages — TXY / Koay',
