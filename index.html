@@ -211,6 +211,8 @@
   .fin-sub-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text3); padding: 8px 16px 4px; border-bottom: 1px solid var(--border); background: var(--bg); }
   .fin-neg { color: var(--red); }
   .fin-row { display: flex; justify-content: space-between; padding: 8px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .fin-row-clickable { cursor: pointer; transition: background 0.1s; }
+  .fin-row-clickable:hover { background: var(--surface2); }
   .fin-row:last-child { border-bottom: none; }
   .fin-row.subtotal { font-weight: 600; background: var(--surface2); }
   .fin-row.total { font-weight: 700; font-size: 14px; background: var(--accent); color: #fff; }
@@ -1435,10 +1437,12 @@ function saveCOA(coa) { localStorage.setItem(COA_LS_KEY, JSON.stringify(coa)); }
 function resetCOA()    { localStorage.removeItem(COA_LS_KEY); }
 
 function computeAccountValue(acct, invoices, vouchers) {
-  // Priority: explicit hardcoded value (snapshot mode) > live mapsFrom > 0
-  // An account is in "snapshot mode" when value is set AND mapsFrom is empty/missing.
-  // If both value and mapsFrom exist, mapsFrom (live) wins — user can clear mapsFrom to lock value.
-  if (!acct.mapsFrom || !acct.mapsFrom.length) return parseFloat(acct.value || 0);
+  // Priority: explicit hardcoded value (snapshot) ALWAYS wins over live mapsFrom.
+  // Account uses live mode only when value is undefined/null/'' AND mapsFrom is set.
+  // mapsFrom is also kept in snapshot mode so it claims categories for the unmapped catchall.
+  const hasValue = acct.value !== undefined && acct.value !== null && acct.value !== '';
+  if (hasValue) return parseFloat(acct.value);
+  if (!acct.mapsFrom || !acct.mapsFrom.length) return 0;
   const set = new Set(acct.mapsFrom.map(s => (s||'').toLowerCase()));
   let sum = 0;
   if (acct.section === 'revenue' || acct.section === 'other_income') {
@@ -1450,6 +1454,191 @@ function computeAccountValue(acct, invoices, vouchers) {
                    .reduce((s,v) => s + parseFloat(v.amount||0), 0);
   }
   return r2(sum);
+}
+
+// ══════════════════════════════════════════════════
+// ACCOUNT DRILL-DOWN — click any BS/IS line to see underlying transactions
+// ══════════════════════════════════════════════════
+// Opening balances per Excel GL 1/1/2026 (carry-forward from FY 25)
+// To add comparative year data later: extend this map with prior-year totals
+const COA_OPENING_BALANCES = {
+  '1010': { date: '2026-01-01', amount:  761.96, note: 'per Excel GL 1/1/2026' },
+  '1100': { date: '2026-01-01', amount: 1980.00, note: 'per Excel GL 1/1/2026' },
+  '1700': { date: '2026-01-01', amount: 9000.00, note: 'NBV per Excel BS 31.12.25' },
+  '1500': { date: '2026-01-01', amount: 5400.00, note: 'NBV per Excel BS 31.12.25' },
+  '1600': { date: '2026-01-01', amount: 1800.00, note: 'NBV per Excel BS 31.12.25' },
+  '3000': { date: '2026-01-01', amount: 12000.00,note: 'Capital per Excel' },
+  '3100': { date: '2026-01-01', amount: 6331.27, note: 'Retained profit b/f from FY25' },
+  '3300': { date: '2026-01-01', amount:  610.69, note: 'Drawings b/f from FY25' },
+};
+
+function openAccountDrill(code) {
+  const coa = getCOA();
+  const acct = coa.find(a => a.code === code);
+  if (!acct) return;
+
+  const sec = COA_SECTIONS[acct.section] || {};
+  const isBS = sec.statement === 'BS';
+
+  const invoices = (INVOICES||[]).filter(i => i.status !== 'cancelled');
+  const receipts = (RECEIPTS||[]);
+  const vouchers = (VOUCHERS||[]).filter(v => !isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__'));
+
+  const txns = [];
+
+  // 1) Balance brought forward (BS accounts only)
+  if (isBS) {
+    const ob = COA_OPENING_BALANCES[code];
+    if (ob) {
+      txns.push({
+        date: ob.date, ref: 'B/F', type: 'OB',
+        description: 'Balance b/f — ' + ob.note,
+        amount: ob.amount
+      });
+    }
+  }
+
+  // 2) Live transactions based on COA mapping & special account roles
+  const matchTokens = new Set(((acct.mapsFrom)||[]).map(s => (s||'').toLowerCase()));
+
+  // Revenue: matching invoices
+  if (sec.side === 'income') {
+    if (matchTokens.has('disbursements_field')) {
+      invoices.filter(i => parseFloat(i.disb_amount||0) > 0.005).forEach(i => {
+        txns.push({
+          date: i.inv_date || i.date, ref: i.inv_no, type: 'INV',
+          description: (i.client_name||'') + ' — disbursement',
+          amount: parseFloat(i.disb_amount||0)
+        });
+      });
+    }
+    invoices.filter(i => matchTokens.has((i.job_type||'').toLowerCase())).forEach(i => {
+      txns.push({
+        date: i.inv_date || i.date, ref: i.inv_no, type: 'INV',
+        description: (i.client_name||'') + (i.job_type ? ' — ' + i.job_type : ''),
+        amount: parseFloat(i.amount||0)
+      });
+    });
+  }
+
+  // Expense: matching vouchers
+  if (sec.side === 'expense') {
+    vouchers.filter(v => matchTokens.has((v.category||'').toLowerCase())).forEach(v => {
+      txns.push({
+        date: v.date, ref: v.voucher_id || v.id, type: 'PV',
+        description: (v.payee||'') + (v.description ? ' — ' + v.description : ''),
+        amount: parseFloat(v.amount||0)
+      });
+    });
+  }
+
+  // Bank: receipts in (+), vouchers out (−)
+  if (/bank|cimb|cash at bank/i.test(acct.name) || code === '1010') {
+    receipts.filter(r => r.payment_account !== 'drawings').forEach(r => {
+      txns.push({
+        date: r.date, ref: r.receipt_id || r.id, type: 'RC',
+        description: 'Receipt — ' + (r.client_name||r.inv_no||''),
+        amount: parseFloat(r.amount||0)
+      });
+    });
+    vouchers.filter(v => v.payment_account !== 'drawings').forEach(v => {
+      txns.push({
+        date: v.date, ref: v.voucher_id || v.id, type: 'PV',
+        description: (v.payee||'') + ' — ' + (v.description||v.category||''),
+        amount: -parseFloat(v.amount||0)
+      });
+    });
+  }
+
+  // Trade debtor: invoices in (+), receipts out (−)
+  if (/trade debtor|account.*receiv/i.test(acct.name) || code === '1100') {
+    invoices.forEach(i => {
+      const gross = parseFloat(i.amount||0) + parseFloat(i.disb_amount||0);
+      if (gross > 0.005) {
+        txns.push({
+          date: i.inv_date || i.date, ref: i.inv_no, type: 'INV',
+          description: 'Invoice — ' + (i.client_name||''),
+          amount: gross
+        });
+      }
+    });
+    receipts.forEach(r => {
+      txns.push({
+        date: r.date, ref: r.receipt_id || r.id, type: 'RC',
+        description: 'Receipt — ' + (r.client_name||r.inv_no||''),
+        amount: -parseFloat(r.amount||0)
+      });
+    });
+  }
+
+  // Drawings: vouchers paid from drawings (+), receipts to drawings (−)
+  if (/drawing/i.test(acct.name) || code === '3300') {
+    vouchers.filter(v => v.payment_account === 'drawings').forEach(v => {
+      txns.push({
+        date: v.date, ref: v.voucher_id || v.id, type: 'PV',
+        description: (v.payee||'') + ' — ' + (v.description||v.category||''),
+        amount: parseFloat(v.amount||0)
+      });
+    });
+    receipts.filter(r => r.payment_account === 'drawings').forEach(r => {
+      txns.push({
+        date: r.date, ref: r.receipt_id || r.id, type: 'RC',
+        description: 'Drawing repayment — ' + (r.client_name||r.inv_no||''),
+        amount: -parseFloat(r.amount||0)
+      });
+    });
+  }
+
+  // Profit for the year — informational note, points back to IS
+  if (code === '3200') {
+    txns.push({
+      date: '', ref: '—', type: 'NOTE',
+      description: 'Net profit = Total Revenue − Total Expenses. See Income Statement for breakdown.',
+      amount: 0
+    });
+  }
+
+  // Sort by date asc
+  txns.sort((a,b) => (a.date||'').localeCompare(b.date||''));
+
+  // Compute running balance
+  let running = 0;
+  txns.forEach(t => { running += parseFloat(t.amount||0); t.running = running; });
+
+  // Render
+  const fmt   = n => parseFloat(Math.abs(n||0)).toLocaleString('en-MY',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const sign  = n => Math.abs(n) < 0.005 ? '—' : (n < 0 ? '(' + fmt(n) + ')' : fmt(n));
+  const valColor = n => n < 0 ? 'var(--red)' : (n > 0 ? 'var(--green)' : 'var(--text3)');
+
+  document.getElementById('drill-title').textContent = (acct.code ? acct.code + '  ' : '') + acct.name;
+  document.getElementById('drill-summary').innerHTML =
+    '<div style="display:flex;gap:24px;flex-wrap:wrap">' +
+    '<div><span style="color:var(--text3)">Section:</span> <strong>' + sec.label + '</strong> <span style="color:var(--text3)">(' + (sec.statement||'') + ')</span></div>' +
+    '<div><span style="color:var(--text3)">Hardcoded:</span> <strong>' + (acct.value !== undefined && acct.value !== null && acct.value !== '' ? 'RM ' + fmt(acct.value) : '—') + '</strong></div>' +
+    '<div><span style="color:var(--text3)">Live total (from txns):</span> <strong>RM ' + fmt(running) + '</strong></div>' +
+    '<div><span style="color:var(--text3)">Transactions:</span> <strong>' + txns.length + '</strong></div>' +
+    (acct.mapsFrom && acct.mapsFrom.length ? '<div><span style="color:var(--text3)">Mapped from:</span> <code style="font-size:11px">' + acct.mapsFrom.join(', ') + '</code></div>' : '') +
+    '</div>';
+
+  const tbody = document.getElementById('drill-tbody');
+  if (!txns.length) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">No transactions for this account.</td></tr>';
+  } else {
+    tbody.innerHTML = txns.map(t => {
+      const dt = (t.date||'').slice(0,10);
+      const amtCol = t.type === 'NOTE' ? 'var(--text3)' : valColor(t.amount);
+      return '<tr>' +
+        '<td style="font-family:\'DM Mono\',monospace;font-size:12px">' + (dt||'—') + '</td>' +
+        '<td style="font-family:\'DM Mono\',monospace;font-size:12px">' + (t.ref||'—') + '</td>' +
+        '<td style="font-size:13px">' + (t.description||'') + '</td>' +
+        '<td><span class="badge" style="font-size:10px">' + t.type + '</span></td>' +
+        '<td style="text-align:right;font-family:\'DM Mono\',monospace;color:' + amtCol + '">' + sign(t.amount) + '</td>' +
+        '<td style="text-align:right;font-family:\'DM Mono\',monospace;color:var(--text2)">' + sign(t.running) + '</td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  openModal('modal-account-drill');
 }
 
 
@@ -3151,6 +3340,35 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
 });
 </script>
 
+<!-- ══ MODAL: ACCOUNT DRILL-DOWN ══ -->
+<div class="modal-overlay" id="modal-account-drill">
+  <div class="modal" style="max-width:980px">
+    <div class="modal-header">
+      <div class="modal-title" id="drill-title">Account drill-down</div>
+      <button class="modal-close" onclick="closeModal('modal-account-drill')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="drill-summary" style="margin-bottom:14px;padding:10px;background:var(--surface2);border-radius:6px;font-size:13px"></div>
+      <table>
+        <thead>
+          <tr>
+            <th style="width:90px">Date</th>
+            <th style="width:90px">Ref</th>
+            <th>Description</th>
+            <th style="width:60px">Type</th>
+            <th style="text-align:right;width:120px">Amount (RM)</th>
+            <th style="text-align:right;width:130px">Running (RM)</th>
+          </tr>
+        </thead>
+        <tbody id="drill-tbody"></tbody>
+      </table>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('modal-account-drill')">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- ══ MODAL: CHART OF ACCOUNTS — EDIT ══ -->
 <div class="modal-overlay" id="modal-coa-edit">
   <div class="modal" style="max-width:560px">
@@ -3450,24 +3668,42 @@ async function loadIncomeStatement() {
   });
   let unmappedRev = 0, unmappedExp = 0;
   const unmappedRevByType = {}, unmappedExpByCat = {};
-  invoices.forEach(i => {
-    const jt = (i.job_type||'').toLowerCase();
-    if (!mappedRevTokens.has(jt)) {
-      const amt = parseFloat(i.amount||0);
-      unmappedRev += amt;
-      unmappedRevByType[i.job_type||'(blank)'] = (unmappedRevByType[i.job_type||'(blank)']||0) + amt;
-    }
-    // disbursements: if no account claims them, count under unmapped
-    if (!disbHandled) unmappedRev += parseFloat(i.disb_amount||0);
+  // Detect "snapshot mode": when ALL income/expense COA accounts have an explicit hardcoded value.
+  // In snapshot mode, the IS reflects only the snapshot — live unmapped entries are
+  // surfaced on the COA page audit panel instead, not on the IS.
+  const allIncomeAccts = coa.filter(a => {
+    const sec = COA_SECTIONS[a.section]||{};
+    return sec.statement === 'PL' && sec.side === 'income';
   });
-  vouchers.forEach(v => {
-    const cat = (v.category||'').toLowerCase();
-    if (!mappedExpTokens.has(cat)) {
-      const amt = parseFloat(v.amount||0);
-      unmappedExp += amt;
-      unmappedExpByCat[v.category||'(blank)'] = (unmappedExpByCat[v.category||'(blank)']||0) + amt;
-    }
+  const allExpenseAccts = coa.filter(a => {
+    const sec = COA_SECTIONS[a.section]||{};
+    return sec.statement === 'PL' && sec.side === 'expense';
   });
+  const hasValue = a => a.value !== undefined && a.value !== null && a.value !== '';
+  const incomeSnapshotMode  = allIncomeAccts.length  > 0 && allIncomeAccts.every(hasValue);
+  const expenseSnapshotMode = allExpenseAccts.length > 0 && allExpenseAccts.every(hasValue);
+
+  if (!incomeSnapshotMode) {
+    invoices.forEach(i => {
+      const jt = (i.job_type||'').toLowerCase();
+      if (!mappedRevTokens.has(jt)) {
+        const amt = parseFloat(i.amount||0);
+        unmappedRev += amt;
+        unmappedRevByType[i.job_type||'(blank)'] = (unmappedRevByType[i.job_type||'(blank)']||0) + amt;
+      }
+      if (!disbHandled) unmappedRev += parseFloat(i.disb_amount||0);
+    });
+  }
+  if (!expenseSnapshotMode) {
+    vouchers.forEach(v => {
+      const cat = (v.category||'').toLowerCase();
+      if (!mappedExpTokens.has(cat)) {
+        const amt = parseFloat(v.amount||0);
+        unmappedExp += amt;
+        unmappedExpByCat[v.category||'(blank)'] = (unmappedExpByCat[v.category||'(blank)']||0) + amt;
+      }
+    });
+  }
   unmappedRev = r2(unmappedRev); unmappedExp = r2(unmappedExp);
 
   const totalRevenue = r2((sectionTotals.revenue||0) + (sectionTotals.other_income||0) + unmappedRev);
@@ -3497,7 +3733,8 @@ async function loadIncomeStatement() {
       const valStr = isExpense ? `(${fmt(v)})` : fmt(v);
       const cls    = isExpense ? 'fin-amt fin-neg' : 'fin-amt';
       const dim    = Math.abs(v) < 0.005 ? 'opacity:0.45' : '';
-      html += `<div class="fin-row indent" style="${dim}"><span>${codeBadge}${a.name}</span><span class="${cls}">${valStr}</span></div>`;
+      const clickAttr = a.code ? `onclick="openAccountDrill('${(a.code||'').replace(/'/g,"\\'")}')" style="${dim};cursor:pointer" title="Click to see underlying transactions"` : `style="${dim}"`;
+      html += `<div class="fin-row indent fin-row-clickable" ${clickAttr}><span>${codeBadge}${a.name}</span><span class="${cls}">${valStr}</span></div>`;
     });
     const subTotal = sectionTotals[sectionKey];
     const stStr    = isExpense ? `(${fmt(subTotal)})` : fmt(subTotal);
@@ -3597,7 +3834,8 @@ async function loadBalanceSheet() {
   const renderRow = (a) => {
     const v    = valueOf(a);
     const code = a.code ? `<span style="color:var(--text3);font-family:'DM Mono',monospace;font-size:11px;margin-right:6px">${a.code}</span>` : '';
-    return `<div class="fin-row indent"><span>${code}${a.name}</span><span class="fin-amt">${valStr(v)}</span></div>`;
+    const click = a.code ? `onclick="openAccountDrill('${(a.code||'').replace(/'/g,"\\'")}')" style="cursor:pointer" title="Click to see underlying transactions"` : '';
+    return `<div class="fin-row indent fin-row-clickable" ${click}><span>${code}${a.name}</span><span class="fin-amt">${valStr(v)}</span></div>`;
   };
   const renderSection = (key, label) => {
     const accts = bsAccts[key] || [];
@@ -4032,14 +4270,14 @@ const COA_EXCEL_SNAPSHOT = {
 
 function syncFromExcelSnapshot() {
   const codes = Object.keys(COA_EXCEL_SNAPSHOT).length;
-  if (!confirm(`Sync ${codes} account values from the Excel snapshot (S 25.4.2026.xlsx, FY 31.12.26)?\n\nThis switches affected accounts into "hardcoded" mode (mapsFrom is removed). Custom accounts you've added are not touched.`)) return;
+  if (!confirm(`Sync ${codes} account values from the Excel snapshot (S 25.4.2026.xlsx, FY 31.12.26)?\n\nThis sets each account's hardcoded value. Existing 'maps from' tokens are preserved (so they still claim live categories for the audit panel). Custom accounts you've added are not touched.`)) return;
   const coa = getCOA();
   let updated = 0, missing = [];
   Object.entries(COA_EXCEL_SNAPSHOT).forEach(([code, value]) => {
     const idx = coa.findIndex(a => a.code === code);
     if (idx < 0) { missing.push(code); return; }
-    coa[idx].value = value;
-    delete coa[idx].mapsFrom;  // switch to hardcoded mode
+    coa[idx].value = value;  // hardcoded value wins over live mapsFrom
+    // mapsFrom is preserved — it still claims live categories for the unmapped catchall
     updated++;
   });
   saveCOA(coa);
