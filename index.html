@@ -211,6 +211,8 @@
   .fin-sub-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text3); padding: 8px 16px 4px; border-bottom: 1px solid var(--border); background: var(--bg); }
   .fin-neg { color: var(--red); }
   .fin-row { display: flex; justify-content: space-between; padding: 8px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .fin-row-clickable { cursor: pointer; transition: background 0.1s; }
+  .fin-row-clickable:hover { background: var(--surface2); }
   .fin-row:last-child { border-bottom: none; }
   .fin-row.subtotal { font-weight: 600; background: var(--surface2); }
   .fin-row.total { font-weight: 700; font-size: 14px; background: var(--accent); color: #fff; }
@@ -1172,7 +1174,8 @@ window.onload = async () => {
 
   // Populate month dropdowns
   populateMonthDropdowns();
-  populateYearDropdowns();
+  // Note: populateYearDropdowns() was historically called here but never defined.
+  // Year dropdowns are now populated lazily inside loadIncomeStatement / loadCOA / etc.
 };
 
 function showLogin() {
