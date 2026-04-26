@@ -1132,21 +1132,8 @@
             <option value="Other">Other</option>
           </select>
         </div>
-        <div class="form-field"><label>Category</label>
-          <select id="pv-category">
-            <option value="wages_ho">Wages — Ho (KC commission)</option>
-            <option value="wages_txy">Wages — TXY (Koay)</option>
-            <option value="wages_et">Wages — ET</option>
-            <option value="wages_ivy">Wages — Ivy</option>
-            <option value="wages_cecilia">Cosec fee — Cecilia</option>
-            <option value="software">Software (Abot)</option>
-            <option value="ssm">SSM charges</option>
-            <option value="transport">Transport / Travel</option>
-            <option value="entertainment">Entertainment</option>
-            <option value="printing">Printing & Stationery</option>
-            <option value="bank_charges">Bank charges</option>
-            <option value="general">General / Miscellaneous</option>
-          </select>
+        <div class="form-field"><label>Category (driven by Chart of Accounts)</label>
+          <select id="pv-category"><option value="">— pick category —</option></select>
         </div>
         <div class="form-field form-full"><label>Paid From Account</label>
           <select id="pv-account">
@@ -1472,6 +1459,7 @@ const COA_DEFAULT = [
   { code: '5120', name: 'Telephone',                    section: 'admin_expense',     mapsFrom: ['telephone'] },
   { code: '5141', name: 'Courier charges',              section: 'admin_expense',     mapsFrom: ['courier'] },
   { code: '6900', name: 'General expenses',             section: 'admin_expense',     mapsFrom: ['general'] },
+  { code: '5150', name: 'Accounting software subscription', section: 'admin_expense', mapsFrom: ['software','accounting_software'] },
   { code: '5400', name: 'Bank charges',                 section: 'admin_expense',     mapsFrom: ['bank_charges'] },
   { code: '6300', name: 'SSM Charges',                  section: 'admin_expense',     mapsFrom: ['ssm'] },
   { code: '6100', name: 'Entertainment',                section: 'admin_expense',     mapsFrom: ['entertainment'] },
@@ -3342,7 +3330,59 @@ function pvSelectAll() {
   pvUpdateTotal();
 }
 
+// Populate the voucher Category dropdown from COA admin_expense + direct_cost accounts.
+// Single source of truth — adding a new account in the COA editor automatically makes
+// it available as a voucher category. The option value is the first mapsFrom token so
+// existing voucher records (with raw values like 'wages_et') continue to match.
+function populateVoucherCategoryDropdown(currentValue) {
+  const sel = document.getElementById('pv-category');
+  if (!sel) return;
+  let coa = [];
+  try { coa = getCOA(); } catch(e) {}
+  const expAccts = coa.filter(a => {
+    const sec = COA_SECTIONS[a.section]||{};
+    return sec.statement === 'PL' && sec.side === 'expense';
+  }).sort((a,b) => (a.code||'').localeCompare(b.code||''));
+
+  // Build options
+  let html = '<option value="">— pick category —</option>';
+  // Group by section
+  const groups = [
+    { sec: 'direct_cost',  label: 'Direct Costs' },
+    { sec: 'admin_expense',label: 'Administrative Expenses' },
+    { sec: 'depreciation', label: 'Depreciation (rare via voucher)' },
+  ];
+  groups.forEach(grp => {
+    const accts = expAccts.filter(a => a.section === grp.sec);
+    if (!accts.length) return;
+    html += `<optgroup label="${grp.label}">`;
+    accts.forEach(a => {
+      const tokens = (a.mapsFrom||[]).filter(t => (t||'').toLowerCase() !== 'disbursements_field');
+      const val = tokens.length ? tokens[0] : ('coa_' + a.code);
+      html += `<option value="${val}">${a.code} ${a.name}</option>`;
+    });
+    html += '</optgroup>';
+  });
+
+  sel.innerHTML = html;
+
+  // Restore current value: if it matches a known mapsFrom token, select it; otherwise add as a fallback
+  if (currentValue) {
+    const exists = Array.from(sel.options).some(o => o.value === currentValue);
+    if (!exists) {
+      const opt = document.createElement('option');
+      opt.value = currentValue;
+      opt.textContent = `(legacy) ${currentValue}`;
+      sel.appendChild(opt);
+    }
+    sel.value = currentValue;
+  }
+}
+
 function openVoucherModal(isEdit) {
+  // Populate Category dropdown from COA (single source of truth)
+  populateVoucherCategoryDropdown();
+
   pvAmountEdited = false;
   document.getElementById('pv-modal-title').textContent = isEdit ? 'Edit Payment Voucher' : 'Payment Voucher';
   document.getElementById('pv-id').value      = '';
@@ -3369,7 +3409,7 @@ function openVoucherEdit(v) {
     pvBuildChecklist(v.payee, v.ref_inv_id ? [v.ref_inv_id] : []);
     document.getElementById('pv-sel-count').textContent = v.ref_inv_id ? `— editing: ${v.inv_no||v.ref_inv_id}` : '— none selected';
   }
-  if (v.category) document.getElementById('pv-category').value = v.category;
+  populateVoucherCategoryDropdown(v.category || '');
 }
 
 function openVoucherEditById(id) {
@@ -3427,7 +3467,7 @@ function onPayeeChange() {
     Ivy: 'wages_ivy', Ho: 'wages_ho', W: 'wages_ho', TXY: 'wages_txy',
     Cecilia: 'wages_cecilia', Abot: 'software'
   };
-  if (catMap[payee]) document.getElementById('pv-category').value = catMap[payee];
+  if (catMap[payee]) populateVoucherCategoryDropdown(catMap[payee]);
   pvAmountEdited = false;
   pvBuildChecklist(payee, []);
 }
