@@ -3675,7 +3675,7 @@ async function loadGL() {
   } catch(e) {}
 
   // Build GL from cache + merge manual journals
-  let rows = buildGLFromCache();
+let rows = (manualJournals && manualJournals.length > 0) ? [] : buildGLFromCache();
   manualJournals.forEach(j => {
     rows.push({
       date: j.date || '',
