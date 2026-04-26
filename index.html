@@ -985,7 +985,7 @@
         <div class="form-field"><label>Billing Party Reg</label><input type="text" id="cl-billing-reg" placeholder="e.g. TR0222795-U" /></div>
         <div class="form-field form-full"><label>Billing Address</label><textarea id="cl-billing-addr" rows="3"></textarea></div>
         <div class="form-field form-full"><label>Client Address (registered)</label><textarea id="cl-client-addr" rows="3"></textarea></div>
-        <div class="form-field"><label>Year-end (MM-DD)</label><input type="text" id="cl-year-end" placeholder="e.g. 12-31" maxlength="5" /></div>
+        <div class="form-field"><label>Year-end (MM-DD)</label><input type="text" id="cl-year-end" placeholder="e.g. Dec 31 (or 12-31)" maxlength="20" /></div>
         <div class="form-field form-full">
           <label>Services this client uses (check all that apply)</label>
           <div id="cl-services-wrap" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px"></div>
@@ -1495,6 +1495,26 @@ const CLIENT_SERVICE_LABELS = {
   mbrs:'MBRS', cosec:'Cosec', tax:'Tax', audit:'Audit', bookkeeping:'Accounting/Bookkeeping', fs:'FS (Audit Exemption)'
 };
 
+
+const _MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function formatYearEnd(s) {
+  if (!s) return '';
+  // Accept "MM-DD", "DD-MM", "MMM DD", "Dec 31" etc.
+  const m1 = /^(\d{1,2})[\s\-/](\d{1,2})$/.exec(s.trim());
+  if (m1) {
+    let mm = parseInt(m1[1],10), dd = parseInt(m1[2],10);
+    // Heuristic: if first part > 12, swap (DD-MM)
+    if (mm > 12 && dd <= 12) { const t=mm; mm=dd; dd=t; }
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) return _MONTH_NAMES[mm-1] + ' ' + dd;
+  }
+  const m2 = /^([A-Za-z]{3,})\s*(\d{1,2})$/.exec(s.trim());
+  if (m2) {
+    const idx = _MONTH_NAMES.findIndex(n => n.toLowerCase() === m2[1].toLowerCase().slice(0,3));
+    if (idx >= 0) return _MONTH_NAMES[idx] + ' ' + parseInt(m2[2],10);
+  }
+  return s;  // unrecognized — preserve as-is
+}
+
 function getAllClientMeta() {
   try {
     const raw = localStorage.getItem(CLIENT_META_KEY);
@@ -1872,7 +1892,10 @@ async function loadClients() {
 }
 
 function renderClients(data) {
-  const rows = data || CLIENTS;
+  let rows = data || CLIENTS;
+  // Hide soft-deleted clients
+  const deletedSet = new Set(getDeletedClients().map(String));
+  rows = rows.filter(c => !deletedSet.has(String(c.client_id)));
   const tbody = document.getElementById('client-tbody');
   if (!rows.length) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text3)">No clients yet. Click + New Client to add one.</td></tr>'; return; }
   const groupBy = document.getElementById('client-group-by')?.value || '';
@@ -1885,10 +1908,11 @@ function renderClients(data) {
       <td><strong>${c.name||''}</strong></td>
       <td style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text2)">${c.reg_no || '—'}</td>
       <td>${svcBadges}</td>
-      <td style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text2)">${meta.year_end || '—'}</td>
+      <td style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text2)">${formatYearEnd(meta.year_end) || '—'}</td>
       <td style="color:var(--text2)">${c.billing_party || '—'}</td>
       <td style="font-size:12px;color:var(--text3)">${c.client_addr ? '✓ On file' : '<span style="color:var(--amber)">Missing</span>'}</td>
-      <td><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openClientModal('${c.client_id}')">Edit</button></td>
+      <td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openClientModal('${c.client_id}')">Edit</button>
+        <button class="btn btn-ghost btn-sm" style="color:var(--red);margin-left:4px" onclick="event.stopPropagation();deleteClientById('${c.client_id}')">Del</button></td>
     </tr>`;
   };
 
@@ -1942,7 +1966,7 @@ function openClientModal(id) {
       </label>`;
     }).join('');
   }
-  document.getElementById('cl-year-end').value = meta.year_end || '';
+  document.getElementById('cl-year-end').value = formatYearEnd(meta.year_end) || '';
   if (id) {
     const c = CLIENTS.find(x => x.client_id === id);
     if (!c) return;
@@ -1978,12 +2002,31 @@ async function saveClient() {
     const services = Array.from(document.querySelectorAll('.cl-svc-chk:checked')).map(el => el.value);
     const year_end = document.getElementById('cl-year-end').value.trim();
     const id = (res.data && res.data.client_id) || data.client_id;
-    if (id) setClientMeta(id, { services, year_end });
+    if (id) setClientMeta(id, { services, year_end: formatYearEnd(year_end) });
     toast('Client saved.', 'success');
     closeModal('modal-client');
     loadClients();
   } else toast(res.error, 'error');
 }
+const CLIENT_DELETED_KEY = 'seraya_clients_deleted_v1';
+function getDeletedClients() {
+  try { return JSON.parse(localStorage.getItem(CLIENT_DELETED_KEY) || '[]'); } catch(e) { return []; }
+}
+function setDeletedClients(arr) { localStorage.setItem(CLIENT_DELETED_KEY, JSON.stringify(arr)); }
+function isClientDeleted(id) { return getDeletedClients().includes(String(id)); }
+
+async function deleteClientById(id) {
+  if (!id) return;
+  const c = CLIENTS.find(x => x.client_id === id);
+  const name = c ? c.name : id;
+  if (!confirm(`Delete client "${name}"?\n\n• Soft-deletion only — backend record stays intact, but the client is hidden from this dashboard.\n• You can recover from localStorage key '${CLIENT_DELETED_KEY}'.\n• Existing invoices for this client are unaffected.`)) return;
+  const arr = getDeletedClients();
+  if (!arr.includes(String(id))) arr.push(String(id));
+  setDeletedClients(arr);
+  toast('Client deleted (soft).', 'success');
+  loadClients();
+}
+
 
 // ══════════════════════════════════════════════════
 // INVOICES
@@ -2055,7 +2098,21 @@ async function openInvoiceModal(id) {
     if (!inv) return;
     document.getElementById('inv-modal-title').textContent = 'Edit Invoice — ' + inv.inv_no;
     document.getElementById('inv-no').value            = inv.inv_no;
-    document.getElementById('inv-date').value          = inv.date ? inv.date.slice(0,10) : '';
+    // Parse date robustly — backend returns "Sun Jan 04 2026 00:00:00 GMT+0800..." which slice(0,10) breaks
+    let _isoDate = '';
+    if (inv.date) {
+      try {
+        if (/^\d{4}-\d{2}-\d{2}/.test(inv.date)) { _isoDate = inv.date.slice(0,10); }
+        else {
+          const _d = new Date(inv.date);
+          if (!isNaN(_d.getTime())) {
+            const y = _d.getFullYear(), m = String(_d.getMonth()+1).padStart(2,'0'), dd = String(_d.getDate()).padStart(2,'0');
+            _isoDate = `${y}-${m}-${dd}`;
+          }
+        }
+      } catch(e) {}
+    }
+    document.getElementById('inv-date').value          = _isoDate;
     document.getElementById('inv-job-type').value      = inv.job_type || 'MBRS';
     document.getElementById('inv-client-name').value   = inv.client_name;
     document.getElementById('inv-billing-party').value = inv.billing_party;
@@ -3918,13 +3975,14 @@ function renderGLRows(rows) {
 
   const sortedAsc = rows.slice().sort((a,b) => (a.date||'').localeCompare(b.date||''));
   let display = sortedAsc;
+  let groupedByAccount = false;
   if (sort === 'date-desc')         display = sortedAsc.slice().reverse();
-  else if (sort === 'account-asc')  display = sortedAsc.slice().sort((a,b) => (a.dr_account||'').localeCompare(b.dr_account||''));
+  else if (sort === 'account-asc')  { display = sortedAsc.slice().sort((a,b) => (a.dr_account||'').localeCompare(b.dr_account||'')); groupedByAccount = true; }
   else if (sort === 'amount-desc')  display = sortedAsc.slice().sort((a,b) => parseFloat(b.amount||0) - parseFloat(a.amount||0));
 
   const fmt = n => parseFloat(n||0).toLocaleString('en-MY',{minimumFractionDigits:2,maximumFractionDigits:2});
 
-  const bodyRows = display.map(g => {
+  const buildRow = (g) => {
     const isJournal = g.source_type === 'journal';
     const editBtn   = isJournal
       ? `<button class="btn btn-ghost btn-sm" onclick="openGLEditById('${(g.gl_id||g.id||'').toString().replace(/'/g,'')}')">Edit</button>`
@@ -3938,7 +3996,32 @@ function renderGLRows(rows) {
       <td style="font-family:'DM Mono',monospace;font-size:13px;text-align:right">RM ${fmt(g.amount)}</td>
       <td>${editBtn}</td>
     </tr>`;
-  }).join('');
+  };
+
+  let bodyRows = '';
+  if (groupedByAccount) {
+    // Insert a subtotal row after each DR-account group
+    let curAcct = null, curRows = [], curSum = 0;
+    const flush = () => {
+      if (!curRows.length) return;
+      bodyRows += curRows.join('');
+      bodyRows += `<tr style="background:var(--surface2);font-weight:600">
+        <td colspan="5" style="font-size:12px;padding:6px 12px;text-align:right">Subtotal — ${curAcct} (${curRows.length} entries)</td>
+        <td style="font-family:'DM Mono',monospace;font-size:13px;text-align:right">RM ${fmt(curSum)}</td>
+        <td></td>
+      </tr>`;
+      curRows = []; curSum = 0;
+    };
+    display.forEach(g => {
+      const acct = g.dr_account || '—';
+      if (acct !== curAcct) { flush(); curAcct = acct; }
+      curRows.push(buildRow(g));
+      curSum += parseFloat(g.amount||0);
+    });
+    flush();
+  } else {
+    bodyRows = display.map(buildRow).join('');
+  }
 
   // Total row
   let totalRowHtml = '';
