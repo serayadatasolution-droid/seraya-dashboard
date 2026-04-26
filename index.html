@@ -3510,29 +3510,11 @@ async function loadAging() {
   tbody.innerHTML = rows.join('');
 }
 
-// ══ RETENTION RECON ══
-async function loadRetention() {
-  const [allocRes, vRes] = await Promise.all([
-    api({ action: 'get_allocations' }),
-    api({ action: 'get_vouchers' })
-  ]);
-  const fmt  = n => 'RM ' + parseFloat(Math.abs(n)||0).toLocaleString('en-MY',{minimumFractionDigits:2});
-  const fmtS = (n, neg) => {
-    const s = 'RM ' + parseFloat(Math.abs(n)||0).toLocaleString('en-MY',{minimumFractionDigits:2});
-    return neg ? `<span style="color:var(--red)">−${s}</span>` : s;
-  };
+// Note: loadRetention() is defined in the first <script> block (around line 1149)
+// using cached ALLOCATIONS + hardcoded deductions to match GL 2026 (RM 4,191.64).
+// An older JSONP-based duplicate previously lived here and was removed because it
+// (a) shadowed the cache-based version and (b) was truncated, breaking the script.
 
-  // ── Pool: admin_retain + abot_cost per allocation ──────────
-  const allocs  = (allocRes.ok ? allocRes.data : ALLOCATIONS) || [];
-  const poolRows = allocs.map(a => {
-    const inv       = INVOICES.find(i => i.inv_no === a.inv_no) || {};
-    const adminRet  = parseFloat(a.admin_retain||0);
-    const abotCost  = parseFloat(a.abot_cost||0);
-    const rowTotal  = r2(adminRet + abotCost);
-    return { inv_no: a.inv_no, client: inv.client_name||a.inv_no||'—', adminRet, abotCost, rowTotal };
-  }).filter(r => r.rowTotal > 0)
-    .sort((a,b) => (a.inv_no||'').localeCompare(b.inv_no||''));
-
-  const totalPool = r2(poolRows.reduce((s,r) => s + r.rowTotal, 0));
-
-  // ── Deductions ──────────
+</script>
+</body>
+</html>
