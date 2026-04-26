@@ -621,7 +621,7 @@
       </div>
       <div class="card">
         <table>
-          <thead><tr><th>Date</th><th>Ref</th><th>Description</th><th>DR Account</th><th>CR Account</th><th style="text-align:right">Amount (RM)</th><th></th></tr></thead>
+          <thead><tr><th>Date</th><th>Ref</th><th>Description</th><th>DR Account</th><th>CR Account</th><th style="text-align:right">Amount (RM)</th><th style="text-align:right">Running (RM)</th><th></th></tr></thead>
           <tbody id="gl-tbody"><tr class="loading-row"><td colspan="7">Loading GL…</td></tr></tbody>
         </table>
       </div>
@@ -3169,20 +3169,52 @@ function buildGLFromCache() {
 
   const rows = [];
 
-  // Invoices → Dr Trade Debtors / Cr Revenue
-  (INVOICES || []).forEach(i => {
-    const amt = r2(parseFloat(i.amount||0) + parseFloat(i.disb_amount||0));
-    if (!amt) return;
-    rows.push({
-      date: i.date || i.inv_date || '',
-      ref: i.inv_no || '',
-      description: `${i.client_name||''} — ${i.job_type||''}`,
-      dr_account: 'Trade Debtors',
-      cr_account: 'Revenue',
-      amount: amt,
-      source_type: 'invoice',
-      id: 'inv_' + i.inv_id,
+  // Build job_type → COA revenue account name lookup (so each invoice posts to its specific revenue line)
+  const __coa = (function(){ try { return getCOA(); } catch(e) { return []; } })();
+  const __jtToRevAcct = {};
+  let   __disbAcctName = null;
+  __coa.filter(a => {
+    const sec = COA_SECTIONS[a.section]||{};
+    return sec.statement === 'PL' && sec.side === 'income';
+  }).forEach(a => {
+    if (!a.mapsFrom) return;
+    a.mapsFrom.forEach(t => {
+      const k = (t||'').toLowerCase();
+      if (k === 'disbursements_field') __disbAcctName = `${a.code} ${a.name}`;
+      else __jtToRevAcct[k] = `${a.code} ${a.name}`;
     });
+  });
+
+  // Invoices → Dr Trade Debtors / Cr [specific revenue account by job_type]
+  (INVOICES || []).forEach(i => {
+    const baseAmt = r2(parseFloat(i.amount||0));
+    const disbAmt = r2(parseFloat(i.disb_amount||0));
+    const jt   = (i.job_type||'').toLowerCase();
+    const revAcct = __jtToRevAcct[jt] || (jt ? `Revenue — ${i.job_type}` : 'Revenue (Unmapped)');
+    if (baseAmt > 0.005) {
+      rows.push({
+        date: i.date || i.inv_date || '',
+        ref: i.inv_no || '',
+        description: `${i.client_name||''}${i.job_type ? ' — ' + i.job_type : ''}`,
+        dr_account: 'Trade Debtors',
+        cr_account: revAcct,
+        amount: baseAmt,
+        source_type: 'invoice',
+        id: 'inv_' + i.inv_id,
+      });
+    }
+    if (disbAmt > 0.005) {
+      rows.push({
+        date: i.date || i.inv_date || '',
+        ref: i.inv_no || '',
+        description: `${i.client_name||''} — disbursement`,
+        dr_account: 'Trade Debtors',
+        cr_account: __disbAcctName || 'Revenue — Disbursements',
+        amount: disbAmt,
+        source_type: 'invoice',
+        id: 'inv_' + i.inv_id + '_disb',
+      });
+    }
   });
 
   // Receipts → Dr Bank or Drawings / Cr Trade Debtors
@@ -3598,31 +3630,112 @@ function sortAndRenderGL() {
 
 function renderGLRows(rows) {
   const tbody  = document.getElementById('gl-tbody');
-  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text3)">No entries.</td></tr>'; return; }
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--text3)">No entries.</td></tr>'; return; }
   const sort = document.getElementById('gl-sort')?.value || 'date-desc';
-  const sorted = rows.slice().sort((a,b) => {
-    if (sort === 'date-asc')     return (a.date||'').localeCompare(b.date||'');
-    if (sort === 'date-desc')    return (b.date||'').localeCompare(a.date||'');
-    if (sort === 'account-asc')  return (a.dr_account||'').localeCompare(b.dr_account||'');
-    if (sort === 'amount-desc')  return parseFloat(b.amount||0) - parseFloat(a.amount||0);
-    return 0;
+
+  // Detect if user filtered by a specific account (filter value starts with 'acct:')
+  const acctFilterRaw = (document.getElementById('gl-filter-account')?.value || '');
+  const accountFilter = acctFilterRaw.startsWith('acct:') ? acctFilterRaw.slice(5).toLowerCase() : null;
+
+  // For running-balance display we always need ascending date order
+  const sortedAsc = rows.slice().sort((a,b) => (a.date||'').localeCompare(b.date||''));
+
+  // Lookup B/F if account filter is active
+  let bfAmount = 0;
+  let bfRowHtml = '';
+  if (accountFilter) {
+    // Match COA account by name (case-insensitive on full account name only — code prefix is OK to ignore for B/F)
+    try {
+      const coa = getCOA();
+      const acct = coa.find(a => {
+        const full = `${a.code||''} ${a.name||''}`.toLowerCase();
+        return full === accountFilter || (a.name||'').toLowerCase() === accountFilter;
+      });
+      if (acct) {
+        const ob = COA_OPENING_BALANCES[acct.code];
+        if (ob) {
+          bfAmount = parseFloat(ob.amount||0);
+          bfRowHtml = `<tr style="background:var(--surface2)">
+            <td style="font-size:12px;color:var(--text2)">${formatDate(ob.date)}</td>
+            <td style="font-family:'DM Mono',monospace;font-size:12px">B/F</td>
+            <td style="font-size:12px;font-style:italic">Balance b/f — ${ob.note}</td>
+            <td></td><td></td>
+            <td style="font-family:'DM Mono',monospace;font-size:13px;text-align:right;color:var(--text2)">—</td>
+            <td style="font-family:'DM Mono',monospace;font-size:13px;text-align:right;font-weight:600">RM ${bfAmount.toLocaleString('en-MY',{minimumFractionDigits:2})}</td>
+            <td><span style="font-size:10px;color:var(--text3)">opening</span></td>
+          </tr>`;
+        }
+      }
+    } catch(e) { console.warn('B/F lookup failed', e); }
+  }
+
+  // Build row HTML in ASC order with running balance, then re-sort if needed for display
+  let running = bfAmount;
+  const augmented = sortedAsc.map(g => {
+    let delta = 0;
+    if (accountFilter) {
+      const dr = (g.dr_account||'').toLowerCase();
+      const cr = (g.cr_account||'').toLowerCase();
+      const amt = parseFloat(g.amount||0);
+      // Account is debited → balance increases (for assets/expenses); credited → decreases
+      // We use sign convention: DR = +, CR = − (so for liability/equity/income accounts the running shows as negative, which is technically correct)
+      if (dr === accountFilter) delta += amt;
+      if (cr === accountFilter) delta -= amt;
+      running += delta;
+    }
+    return { g, delta, running };
   });
-  tbody.innerHTML = sorted.map(g => {
+
+  // For display: respect the chosen sort direction
+  let display = augmented;
+  if (sort === 'date-desc')         display = augmented.slice().reverse();
+  else if (sort === 'account-asc')  display = augmented.slice().sort((a,b) => (a.g.dr_account||'').localeCompare(b.g.dr_account||''));
+  else if (sort === 'amount-desc')  display = augmented.slice().sort((a,b) => parseFloat(b.g.amount||0) - parseFloat(a.g.amount||0));
+
+  const fmt = n => parseFloat(n||0).toLocaleString('en-MY',{minimumFractionDigits:2,maximumFractionDigits:2});
+
+  const bodyRows = display.map(({g, delta, running:r}) => {
     const isJournal = g.source_type === 'journal';
     const editBtn   = isJournal
       ? `<button class="btn btn-ghost btn-sm" onclick="openGLEditById('${(g.gl_id||g.id||'').toString().replace(/'/g,'')}')">Edit</button>`
       : `<span style="font-size:10px;color:var(--text3)">${g.source_type||''}</span>`;
-    return `
-    <tr>
+    const runCell = accountFilter
+      ? `<td style="font-family:'DM Mono',monospace;font-size:12px;text-align:right;color:var(--text2)">RM ${fmt(r)}</td>`
+      : `<td style="text-align:right;color:var(--text3)">—</td>`;
+    return `<tr>
       <td style="font-size:12px;color:var(--text2)">${formatDate(g.date)}</td>
       <td style="font-family:'DM Mono',monospace;font-size:12px">${g.ref||'—'}</td>
       <td style="font-size:12px">${g.description||'—'}</td>
       <td><span class="gl-dr">${g.dr_code ? g.dr_code+' ' : ''}${g.dr_account||''}</span></td>
       <td><span class="gl-cr">${g.cr_code ? g.cr_code+' ' : ''}${g.cr_account||''}</span></td>
-      <td style="font-family:'DM Mono',monospace;font-size:13px;text-align:right">RM ${parseFloat(g.amount||0).toLocaleString('en-MY',{minimumFractionDigits:2})}</td>
+      <td style="font-family:'DM Mono',monospace;font-size:13px;text-align:right">RM ${fmt(g.amount)}</td>
+      ${runCell}
       <td>${editBtn}</td>
     </tr>`;
   }).join('');
+
+  // Total row (only when account-filtered): closing balance + sum of debits/credits
+  let totalRowHtml = '';
+  if (accountFilter && augmented.length) {
+    const closing = augmented.length ? augmented[augmented.length-1].running : bfAmount;
+    let totalDr = 0, totalCr = 0;
+    augmented.forEach(({g}) => {
+      const dr = (g.dr_account||'').toLowerCase();
+      const cr = (g.cr_account||'').toLowerCase();
+      const amt = parseFloat(g.amount||0);
+      if (dr === accountFilter) totalDr += amt;
+      if (cr === accountFilter) totalCr += amt;
+    });
+    totalRowHtml = `<tr style="background:var(--accent);color:#fff;font-weight:600">
+      <td colspan="3" style="font-size:12px;padding:10px 12px">Closing balance (B/F + DR ${fmt(totalDr)} − CR ${fmt(totalCr)})</td>
+      <td></td><td></td>
+      <td style="font-family:'DM Mono',monospace;font-size:13px;text-align:right">—</td>
+      <td style="font-family:'DM Mono',monospace;font-size:13px;text-align:right">RM ${fmt(closing)}</td>
+      <td></td>
+    </tr>`;
+  }
+
+  tbody.innerHTML = bfRowHtml + bodyRows + totalRowHtml;
 }
 
 function openGLEditById(id) {
