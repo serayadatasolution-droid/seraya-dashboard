@@ -2291,6 +2291,19 @@ function recalcAllocation() {
   document.getElementById('alloc-preview').style.display = '';
 }
 
+function _toIsoDate(s) {
+  if (!s) return '';
+  if (typeof s !== 'string') s = String(s);
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0,10);
+  try {
+    const d = new Date(s);
+    if (!isNaN(d.getTime())) {
+      const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), dd = String(d.getDate()).padStart(2,'0');
+      return `${y}-${m}-${dd}`;
+    }
+  } catch(e) {}
+  return '';
+}
 function r2(n) { return Math.round(n * 100) / 100; }
 
 async function saveInvoice() {
@@ -3120,7 +3133,7 @@ function openReceiptEdit(r) {
   rcAmountEdited = true; // keep existing amount, don't overwrite
   document.getElementById('rc-modal-title').textContent = 'Edit Receipt';
   document.getElementById('rc-id').value      = r.receipt_id || '';
-  document.getElementById('rc-date').value    = r.date || '';
+  document.getElementById('rc-date').value    = _toIsoDate(r.date);
   document.getElementById('rc-amount').value  = r.amount || '';
   document.getElementById('rc-notes').value   = r.notes || '';
   document.getElementById('rc-account').value = r.payment_account || 'bank';
@@ -3400,7 +3413,7 @@ function openVoucherEdit(v) {
   openVoucherModal(true);
   pvAmountEdited = true;
   document.getElementById('pv-id').value       = v.voucher_id || v.id || '';
-  document.getElementById('pv-date').value     = v.date || '';
+  document.getElementById('pv-date').value     = _toIsoDate(v.date);
   document.getElementById('pv-amount').value   = v.amount || '';
   document.getElementById('pv-desc').value     = v.description || '';
   document.getElementById('pv-account').value  = v.payment_account || 'bank';
@@ -4254,10 +4267,24 @@ function renderGLRows(rows) {
   const fmt = n => parseFloat(n||0).toLocaleString('en-MY',{minimumFractionDigits:2,maximumFractionDigits:2});
 
   const buildRow = (g) => {
-    const isJournal = g.source_type === 'journal';
-    const editBtn   = isJournal
-      ? `<button class="btn btn-ghost btn-sm" onclick="openGLEditById('${(g.gl_id||g.id||'').toString().replace(/'/g,'')}')">Edit</button>`
-      : `<span style="font-size:10px;color:var(--text3)">${g.source_type||''}</span>`;
+    // Determine the right edit handler based on source_type
+    let editBtn = `<span style="font-size:10px;color:var(--text3)">${g.source_type||''}</span>`;
+    const sourceType = g.source_type;
+    const idStr = (g.gl_id||g.id||'').toString();
+    if (sourceType === 'journal') {
+      editBtn = `<button class="btn btn-ghost btn-sm" onclick="openGLEditById('${idStr.replace(/'/g,'')}')">Edit</button>`;
+    } else if (sourceType === 'voucher' && idStr) {
+      // id from buildGLFromCache is 'pv_<voucher_id>' — strip prefix
+      const vid = idStr.replace(/^pv_/, '').replace(/'/g,'');
+      editBtn = `<button class="btn btn-ghost btn-sm" onclick="openVoucherEditById('${vid}')">Edit voucher</button>`;
+    } else if (sourceType === 'receipt' && idStr) {
+      const rid = idStr.replace(/^rc_/, '').replace(/'/g,'');
+      editBtn = `<button class="btn btn-ghost btn-sm" onclick="openReceiptEditById('${rid}')">Edit receipt</button>`;
+    } else if (sourceType === 'invoice' && idStr) {
+      // id is 'inv_<inv_id>' or 'inv_<inv_id>_disb' — strip prefix and any _disb suffix
+      const iid = idStr.replace(/^inv_/, '').replace(/_disb$/, '').replace(/'/g,'');
+      editBtn = `<button class="btn btn-ghost btn-sm" onclick="showPage('invoices');setTimeout(function(){openInvoiceModal('${iid}')},150)">Edit invoice</button>`;
+    }
     return `<tr>
       <td style="font-size:12px;color:var(--text2)">${formatDate(g.date)}</td>
       <td style="font-family:'DM Mono',monospace;font-size:12px">${g.ref||'—'}</td>
