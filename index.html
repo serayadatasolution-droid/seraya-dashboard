@@ -3395,11 +3395,50 @@ async function loadIncomeStatement() {
     sectionTotals[s] = r2(sectionAccts[s].reduce((sum,a) => sum + computeAccountValue(a, invoices, vouchers), 0));
   });
 
-  const totalRevenue = r2((sectionTotals.revenue||0) + (sectionTotals.other_income||0));
+  // Catch-all: any invoice or voucher whose category isn't covered by COA mapsFrom
+  const mappedRevTokens = new Set();
+  const mappedExpTokens = new Set();
+  let disbHandled = false;
+  coa.forEach(a => {
+    if (!a.mapsFrom) return;
+    const sec = COA_SECTIONS[a.section] || {};
+    a.mapsFrom.forEach(t => {
+      const k = (t||'').toLowerCase();
+      if (sec.side === 'income') {
+        if (k === 'disbursements_field') disbHandled = true;
+        else mappedRevTokens.add(k);
+      } else if (sec.side === 'expense') {
+        mappedExpTokens.add(k);
+      }
+    });
+  });
+  let unmappedRev = 0, unmappedExp = 0;
+  const unmappedRevByType = {}, unmappedExpByCat = {};
+  invoices.forEach(i => {
+    const jt = (i.job_type||'').toLowerCase();
+    if (!mappedRevTokens.has(jt)) {
+      const amt = parseFloat(i.amount||0);
+      unmappedRev += amt;
+      unmappedRevByType[i.job_type||'(blank)'] = (unmappedRevByType[i.job_type||'(blank)']||0) + amt;
+    }
+    // disbursements: if no account claims them, count under unmapped
+    if (!disbHandled) unmappedRev += parseFloat(i.disb_amount||0);
+  });
+  vouchers.forEach(v => {
+    const cat = (v.category||'').toLowerCase();
+    if (!mappedExpTokens.has(cat)) {
+      const amt = parseFloat(v.amount||0);
+      unmappedExp += amt;
+      unmappedExpByCat[v.category||'(blank)'] = (unmappedExpByCat[v.category||'(blank)']||0) + amt;
+    }
+  });
+  unmappedRev = r2(unmappedRev); unmappedExp = r2(unmappedExp);
+
+  const totalRevenue = r2((sectionTotals.revenue||0) + (sectionTotals.other_income||0) + unmappedRev);
   const totalDirect  = r2(sectionTotals.direct_cost||0);
   const totalAdmin   = r2(sectionTotals.admin_expense||0);
   const totalDeprec  = r2(sectionTotals.depreciation||0);
-  const totalExp     = r2(totalDirect + totalAdmin + totalDeprec);
+  const totalExp     = r2(totalDirect + totalAdmin + totalDeprec + unmappedExp);
   const profit       = r2(totalRevenue - totalExp);
   const margin       = totalRevenue ? (profit/totalRevenue*100).toFixed(1) : 0;
 
@@ -3431,12 +3470,26 @@ async function loadIncomeStatement() {
     return html;
   };
 
+  const fmtUnmapped = (label, byMap, isExpense) => {
+    const entries = Object.entries(byMap).filter(([_,v]) => Math.abs(v) > 0.005).sort((a,b) => b[1]-a[1]);
+    if (!entries.length) return '';
+    let html = `<div class="fin-section-title" style="margin-top:8px;color:var(--amber)">${label} <span style="font-size:10px;font-weight:400">(unmapped — add an account in Chart of Accounts)</span></div>`;
+    entries.forEach(([k,v]) => {
+      const valStr = isExpense ? `(${fmt(v)})` : fmt(v);
+      const cls    = isExpense ? 'fin-amt fin-neg' : 'fin-amt';
+      html += `<div class="fin-row indent"><span style="color:var(--amber)">${k}</span><span class="${cls}">${valStr}</span></div>`;
+    });
+    return html;
+  };
+
   let rows = '';
   rows += renderSection('revenue',       'Revenue',                 false);
   rows += renderSection('other_income',  'Other Income',            false);
+  rows += fmtUnmapped('Other Revenue', unmappedRevByType, false);
   rows += `<div class="fin-row subtotal" style="background:var(--surface2);font-weight:600"><span>Total Revenue</span><span class="fin-amt">${fmt(totalRevenue)}</span></div>`;
   rows += renderSection('direct_cost',   'Direct Costs',            true);
   rows += renderSection('admin_expense', 'Administrative Expenses', true);
+  rows += fmtUnmapped('Other Expenses', unmappedExpByCat, true);
   rows += renderSection('depreciation',  'Depreciation',            true);
   rows += `<div class="fin-row subtotal" style="background:var(--surface2);font-weight:600"><span>Total Expenses</span><span class="fin-amt fin-neg">(${fmt(totalExp)})</span></div>`;
   rows += `<div class="fin-row total"><span>Net Profit / (Loss)</span><span class="fin-amt" style="color:${profit>=0?'var(--green)':'var(--red)'}">${profit<0?'(':''}${fmt(profit)}${profit<0?')':''}</span></div>`;
@@ -3452,12 +3505,18 @@ async function loadIncomeStatement() {
 async function loadBalanceSheet() {
   document.getElementById('bs-assets').innerHTML = '<div style="padding:20px;color:var(--text3)">Loading…</div>';
 
-  const invoices = (INVOICES.length ? INVOICES : []).filter(i => i.status !== 'cancelled');
-  const vouchers = VOUCHERS.length ? VOUCHERS : [];
+  // Filter to current FY (matches Excel BS at 31.12.YYYY) — drawings/profit/etc. are "for the year"
+  const fyYear = String(new Date().getFullYear());
+  const inFY  = d => (d||'').startsWith(fyYear);
+  const invoices = (INVOICES.length ? INVOICES : []).filter(i => i.status !== 'cancelled' && inFY(i.inv_date||i.date||''));
+  const vouchers = (VOUCHERS.length ? VOUCHERS : []).filter(v => inFY(v.date||'') && !isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__'));
+
+  // For Trade Debtor live calc we want ALL outstanding (regardless of year), so use unfiltered list
+  const allInvoices = (INVOICES.length ? INVOICES : []).filter(i => i.status !== 'cancelled');
 
   const coa = getCOA();
 
-  // Compute net profit from P/L COA accounts
+  // Compute net profit from P/L COA accounts (current FY only)
   const plCoa = coa.filter(a => COA_PL_ORDER.includes(a.section));
   let plRevenue = 0, plExpense = 0;
   plCoa.forEach(a => {
@@ -3468,14 +3527,18 @@ async function loadBalanceSheet() {
   });
   const plNetProfit = r2(plRevenue - plExpense);
 
-  const liveDebtors = r2(invoices
+  const liveDebtors = r2(allInvoices
     .filter(i => i.status === 'outstanding' || i.status === 'partial')
     .reduce((s,i) => s + parseFloat(i.amount_outstanding || i.amount || 0), 0));
 
   const valueOf = (a) => {
+    // Hardcoded value takes priority if explicitly set (and no live mapping defined)
+    const hasValue = a.value !== undefined && a.value !== null && a.value !== '';
+    const hasLive  = (a.mapsFrom && a.mapsFrom.length) || a.source;
+    if (hasValue && !hasLive) return parseFloat(a.value);
+    if (a.mapsFrom && a.mapsFrom.length)           return computeAccountValue(a, invoices, vouchers);
     if (a.source === 'pl_net_profit')              return plNetProfit;
     if (a.source === 'live_outstanding_invoices')  return liveDebtors;
-    if (a.mapsFrom && a.mapsFrom.length)           return computeAccountValue(a, invoices, vouchers);
     return parseFloat(a.value || 0);
   };
 
@@ -3766,8 +3829,10 @@ function saveAccountEdit() {
     const idx = coa.findIndex(a => a.code === _coaEditOrigCode);
     if (idx >= 0) {
       const oldSource = coa[idx].source;
-      coa[idx] = { ...coa[idx], ...newAcct };
-      if (oldSource && coa[idx].source === undefined) coa[idx].source = oldSource;
+      // Replace cleanly: drop fields not in newAcct
+      coa[idx] = { ...newAcct };
+      // Preserve `source` ONLY if user kept mapsFrom (live mode); drop it for hardcoded mode
+      if (oldSource && newAcct.mapsFrom && newAcct.mapsFrom.length) coa[idx].source = oldSource;
     }
   } else {
     coa.push(newAcct);
