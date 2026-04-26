@@ -1449,7 +1449,7 @@ function computeAccountValue(acct, invoices, vouchers) {
   let sum = 0;
   if (acct.section === 'revenue' || acct.section === 'other_income') {
     if (set.has('disbursements_field')) sum += invoices.reduce((s,i) => s + parseFloat(i.disb_amount||0), 0);
-    sum += invoices.filter(i => set.has((i.job_type||'').toLowerCase()))
+    sum += invoices.filter(i => set.has(getInvJobType(i).toLowerCase()))
                    .reduce((s,i) => s + parseFloat(i.amount||0), 0);
   } else {
     sum += vouchers.filter(v => set.has((v.category||'').toLowerCase()))
@@ -1476,6 +1476,28 @@ function augmentInvoicesWithJobType() {
       if (k && jtMap[k]) i.job_type = jtMap[k];
     }
   });
+}
+
+// Lookup helper — returns the effective job_type for an invoice.
+// Falls back to ALLOCATIONS lookup if invoice record itself doesn't have it.
+// Use this EVERYWHERE in reporting code instead of reading i.job_type directly,
+// because loadInvoices() replaces INVOICES with backend data that lacks job_type.
+let __jtCache = null;  // memoized inv_no → job_type map; reset on invoice/allocation load
+function _rebuildJtCache() {
+  __jtCache = {};
+  (window.ALLOCATIONS || []).forEach(a => {
+    const k = (a.inv_no||'').toString().trim();
+    const v = (a.job_type||'').toString().trim();
+    if (k && v && !__jtCache[k]) __jtCache[k] = v;
+  });
+}
+function invalidateJtCache() { __jtCache = null; }
+function getInvJobType(inv) {
+  if (!inv) return '';
+  if (inv.job_type && String(inv.job_type).trim()) return String(inv.job_type).trim();
+  if (__jtCache === null) _rebuildJtCache();
+  const k = (inv.inv_no||'').toString().trim();
+  return k ? (__jtCache[k] || '') : '';
 }
 
 // ══════════════════════════════════════════════════
@@ -1561,10 +1583,11 @@ async function openAccountDrill(code) {
         });
       });
     }
-    invoices.filter(i => matchTokens.has((i.job_type||'').toLowerCase())).forEach(i => {
+    invoices.filter(i => matchTokens.has(getInvJobType(i).toLowerCase())).forEach(i => {
+      const ejt = getInvJobType(i);
       txns.push({
         date: i.inv_date || i.date, ref: i.inv_no, type: 'INV',
-        description: (i.client_name||'') + (i.job_type ? ' — ' + i.job_type : ''),
+        description: (i.client_name||'') + (ejt ? ' — ' + ejt : ''),
         amount: parseFloat(i.amount||0)
       });
     });
@@ -1839,7 +1862,7 @@ async function saveClient() {
 // ══════════════════════════════════════════════════
 async function loadInvoices() {
   const res = await api({ action: 'get_invoices' });
-  if (res.ok) { INVOICES = res.data; renderInvoices(); loadDashboard(); populateInvoiceDropdowns(); }
+  if (res.ok) { INVOICES = res.data; invalidateJtCache(); renderInvoices(); loadDashboard(); populateInvoiceDropdowns(); }
 }
 
 function renderInvoices(data) {
@@ -2245,7 +2268,7 @@ function printInvoice() {
 // ══════════════════════════════════════════════════
 async function loadAllocations() {
   const res = await api({ action: 'get_allocations' });
-  if (res.ok) { ALLOCATIONS = res.data; renderAllocations(); }
+  if (res.ok) { ALLOCATIONS = res.data; invalidateJtCache(); renderAllocations(); }
 }
 
 function renderAllocations(data) {
@@ -3213,13 +3236,14 @@ function buildGLFromCache() {
   (INVOICES || []).forEach(i => {
     const baseAmt = r2(parseFloat(i.amount||0));
     const disbAmt = r2(parseFloat(i.disb_amount||0));
-    const jt   = (i.job_type||'').toLowerCase();
-    const revAcct = __jtToRevAcct[jt] || (jt ? `Revenue — ${i.job_type}` : 'Revenue (Unmapped)');
+    const effJt = getInvJobType(i);
+    const jt    = effJt.toLowerCase();
+    const revAcct = __jtToRevAcct[jt] || (jt ? `Revenue — ${effJt}` : 'Revenue (Unmapped)');
     if (baseAmt > 0.005) {
       rows.push({
         date: i.date || i.inv_date || '',
         ref: i.inv_no || '',
-        description: `${i.client_name||''}${i.job_type ? ' — ' + i.job_type : ''}`,
+        description: `${i.client_name||''}${effJt ? ' — ' + effJt : ''}`,
         dr_account: 'Trade Debtors',
         cr_account: revAcct,
         amount: baseAmt,
@@ -3922,11 +3946,12 @@ async function loadIncomeStatement() {
 
   if (!incomeSnapshotMode) {
     invoices.forEach(i => {
-      const jt = (i.job_type||'').toLowerCase();
+      const ejt = getInvJobType(i);
+      const jt = ejt.toLowerCase();
       if (!mappedRevTokens.has(jt)) {
         const amt = parseFloat(i.amount||0);
         unmappedRev += amt;
-        unmappedRevByType[i.job_type||'(blank)'] = (unmappedRevByType[i.job_type||'(blank)']||0) + amt;
+        unmappedRevByType[ejt||'(blank)'] = (unmappedRevByType[ejt||'(blank)']||0) + amt;
       }
       if (!disbHandled) unmappedRev += parseFloat(i.disb_amount||0);
     });
@@ -4159,8 +4184,9 @@ async function loadSalesAnalysis() {
   });
   const typeMap = {};
   data.forEach(i => {
-    const k = (i.job_type||'').toLowerCase();
-    const lbl = jtToAcct[k] || (i.job_type ? i.job_type : 'Unmapped');
+    const ejt = getInvJobType(i);
+    const k = ejt.toLowerCase();
+    const lbl = jtToAcct[k] || (ejt ? ejt : 'Unmapped');
     typeMap[lbl] = (typeMap[lbl]||0) + parseFloat(i.amount||0);
     const disb = parseFloat(i.disb_amount||0);
     if (disb > 0.005 && disbAcctName) {
@@ -4367,7 +4393,7 @@ function renderCOAAudit() {
   // Aggregate live by job_type
   const jtAgg = {};
   invoices.forEach(i => {
-    const k = (i.job_type||'(blank)').toString();
+    const k = (getInvJobType(i)||'(blank)').toString();
     if (!jtAgg[k]) jtAgg[k] = {count:0, sum:0};
     jtAgg[k].count++;
     jtAgg[k].sum += parseFloat(i.amount||0);
