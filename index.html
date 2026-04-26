@@ -836,6 +836,27 @@
           </table>
         </div>
       </div>
+
+      <div class="page-header" style="margin-top:30px;border-top:1px solid var(--border);padding-top:20px">
+        <div class="page-title" style="font-size:20px">Reconciliation Report</div>
+        <div class="page-sub">For each P/L account that has a hardcoded Excel snapshot, this shows the live aggregate and the variance. Click <strong>+</strong> on a row to expand the contributing live transactions — that's where you'll spot which specific invoice or voucher is causing the gap.</div>
+      </div>
+      <div class="card">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:80px">Code</th>
+              <th>Account</th>
+              <th style="text-align:right;width:120px">Excel (RM)</th>
+              <th style="text-align:right;width:120px">Live (RM)</th>
+              <th style="text-align:right;width:120px">Variance (RM)</th>
+              <th style="width:80px">Status</th>
+              <th style="width:50px"></th>
+            </tr>
+          </thead>
+          <tbody id="coa-recon-tbody"></tbody>
+        </table>
+      </div>
     </div>
 
   </div><!-- end main -->
@@ -1965,6 +1986,15 @@ function openClientModal(id) {
         <input type="checkbox" value="${s}" ${checked} class="cl-svc-chk" /> ${CLIENT_SERVICE_LABELS[s]}
       </label>`;
     }).join('');
+  }
+  // Normalize stored value if it's still in raw form (e.g. "12-31")
+  if (meta.year_end) {
+    const formatted = formatYearEnd(meta.year_end);
+    if (formatted && formatted !== meta.year_end) {
+      meta.year_end = formatted;
+      // Persist back so future renders use the normalized form
+      try { setClientMeta(editingClientId, meta); } catch(e) {}
+    }
   }
   document.getElementById('cl-year-end').value = formatYearEnd(meta.year_end) || '';
   if (id) {
@@ -4655,6 +4685,114 @@ function renderCOAAudit() {
     '<tr><td colspan="4" style="text-align:center;color:var(--text3);padding:20px">No vouchers in this year</td></tr>';
   document.getElementById('coa-audit-jt-tbody').innerHTML  = jtRows;
   document.getElementById('coa-audit-cat-tbody').innerHTML = catRows;
+  renderReconciliation(yr);
+}
+
+function renderReconciliation(yr) {
+  const tbody = document.getElementById('coa-recon-tbody');
+  if (!tbody) return;
+  const inYr = d => !yr || (d||'').startsWith(yr);
+  const invoices = (INVOICES||[]).filter(i => i.status !== 'cancelled' && inYr(i.inv_date||i.date||''));
+  const vouchers = (VOUCHERS||[]).filter(v => inYr(v.date||'') && !isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__'));
+
+  const coa = getCOA();
+  const fmt = n => parseFloat(n||0).toLocaleString('en-MY',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const sign = n => n < 0 ? '(' + fmt(Math.abs(n)) + ')' : fmt(n);
+
+  const plAccts = coa.filter(a => COA_PL_ORDER.includes(a.section));
+  let html = '';
+  let totalSnap = 0, totalLive = 0;
+
+  // Group by section for visual clarity
+  const order = COA_PL_ORDER;
+  order.forEach(section => {
+    const accts = plAccts.filter(a => a.section === section);
+    if (!accts.length) return;
+    const sec = COA_SECTIONS[section] || { label: section };
+    html += `<tr style="background:var(--surface2)"><td colspan="7" style="font-weight:600;color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding:8px 12px">${sec.label}</td></tr>`;
+    accts.sort((a,b) => (a.code||'').localeCompare(b.code||'')).forEach(a => {
+      const hasSnap = a.value !== undefined && a.value !== null && a.value !== '';
+      const snap    = hasSnap ? parseFloat(a.value) : 0;
+      // Live: aggregate from invoices/vouchers per mapsFrom
+      let live = 0;
+      const contributors = [];
+      if (a.mapsFrom && a.mapsFrom.length) {
+        const set = new Set(a.mapsFrom.map(s => (s||'').toLowerCase()));
+        if (sec.side === 'income') {
+          if (set.has('disbursements_field')) {
+            invoices.filter(i => parseFloat(i.disb_amount||0) > 0.005).forEach(i => {
+              const amt = parseFloat(i.disb_amount||0);
+              live += amt;
+              contributors.push({ ref: i.inv_no, desc: (i.client_name||'') + ' — disbursement', amt, type: 'INV' });
+            });
+          }
+          invoices.filter(i => set.has(getInvJobType(i).toLowerCase())).forEach(i => {
+            const amt = parseFloat(i.amount||0);
+            live += amt;
+            contributors.push({ ref: i.inv_no, desc: (i.client_name||'') + (getInvJobType(i) ? ' — ' + getInvJobType(i) : ''), amt, type: 'INV' });
+          });
+        } else if (sec.side === 'expense') {
+          vouchers.filter(v => set.has((v.category||'').toLowerCase())).forEach(v => {
+            const amt = parseFloat(v.amount||0);
+            live += amt;
+            contributors.push({ ref: v.voucher_id, desc: (v.payee||'') + (v.description ? ' — ' + v.description : ''), amt, type: 'PV' });
+          });
+        }
+      }
+      live = r2(live);
+      const variance = r2(live - snap);
+      totalSnap += snap; totalLive += live;
+      const status = !hasSnap
+        ? '<span style="color:var(--text3);font-size:11px">no snapshot</span>'
+        : (Math.abs(variance) < 0.01
+          ? '<span style="color:var(--green);font-weight:600;font-size:11px">✓ tally</span>'
+          : '<span style="color:var(--amber);font-weight:600;font-size:11px">⚠ variance</span>');
+      const varColor = Math.abs(variance) < 0.01 ? 'var(--text3)' : (variance > 0 ? 'var(--amber)' : 'var(--red)');
+      const rowId = 'recon-row-' + (a.code || Math.random().toString(36).slice(2));
+      html += `<tr>
+        <td style="font-family:'DM Mono',monospace;font-weight:600">${a.code||''}</td>
+        <td>${a.name||''}</td>
+        <td style="text-align:right;font-family:'DM Mono',monospace">${hasSnap ? fmt(snap) : '—'}</td>
+        <td style="text-align:right;font-family:'DM Mono',monospace">${fmt(live)}</td>
+        <td style="text-align:right;font-family:'DM Mono',monospace;color:${varColor};font-weight:600">${Math.abs(variance) < 0.01 ? '—' : sign(variance)}</td>
+        <td>${status}</td>
+        <td>${contributors.length ? '<button class="btn btn-ghost btn-sm" onclick="toggleReconRow(\''+rowId+'\')">+</button>' : ''}</td>
+      </tr>`;
+      if (contributors.length) {
+        const sortedContributors = contributors.slice().sort((x,y) => y.amt - x.amt);
+        html += `<tr id="${rowId}" style="display:none;background:var(--surface2)">
+          <td colspan="7" style="padding:0">
+            <table style="width:100%;margin:0">
+              <thead><tr><th style="width:90px">Ref</th><th>Description</th><th style="width:60px">Type</th><th style="text-align:right;width:120px">Amount (RM)</th></tr></thead>
+              <tbody>${sortedContributors.map(c =>
+                `<tr><td style="font-family:'DM Mono',monospace;font-size:12px">${c.ref||'—'}</td><td style="font-size:12px">${c.desc||''}</td><td><span class="badge" style="font-size:10px">${c.type}</span></td><td style="text-align:right;font-family:'DM Mono',monospace">${fmt(c.amt)}</td></tr>`
+              ).join('')}
+              <tr style="font-weight:600;background:var(--surface)"><td colspan="3" style="text-align:right">Subtotal</td><td style="text-align:right;font-family:'DM Mono',monospace">${fmt(live)}</td></tr>
+              </tbody>
+            </table>
+          </td>
+        </tr>`;
+      }
+    });
+  });
+
+  totalSnap = r2(totalSnap); totalLive = r2(totalLive);
+  const totalVar = r2(totalLive - totalSnap);
+  const totalStatusColor = Math.abs(totalVar) < 0.01 ? 'var(--green)' : 'var(--amber)';
+  html += `<tr style="background:var(--accent);color:#fff;font-weight:700">
+    <td colspan="2" style="padding:10px 12px">TOTAL</td>
+    <td style="text-align:right;font-family:'DM Mono',monospace">RM ${fmt(totalSnap)}</td>
+    <td style="text-align:right;font-family:'DM Mono',monospace">RM ${fmt(totalLive)}</td>
+    <td style="text-align:right;font-family:'DM Mono',monospace">${Math.abs(totalVar) < 0.01 ? 'Nil' : sign(totalVar)}</td>
+    <td colspan="2" style="font-size:11px">${Math.abs(totalVar) < 0.01 ? '✓ tallies' : 'investigate'}</td>
+  </tr>`;
+  tbody.innerHTML = html || '<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--text3)">No P/L accounts to reconcile.</td></tr>';
+}
+
+function toggleReconRow(id) {
+  const r = document.getElementById(id);
+  if (!r) return;
+  r.style.display = r.style.display === 'none' ? '' : 'none';
 }
 
 let _coaEditOrigCode = null;
