@@ -617,9 +617,10 @@
     <div class="page" id="page-gl">
       <div class="page-header">
         <div class="page-title">General Ledger</div>
-        <div class="page-sub">Auto-posted from invoices, receipts and payment vouchers. Manual entries supported.</div>
+        <div class="page-sub">Auto-posted from invoices, receipts and payment vouchers. Manual journals + reclass supported.</div>
         <div class="page-actions">
           <button class="btn btn-primary" onclick="openGLModal()">+ New Journal Entry</button>
+          <button class="btn btn-secondary" onclick="openReclassModal()">⇄ Reclassify</button>
         </div>
       </div>
       <div class="filters">
@@ -839,7 +840,11 @@
 
       <div class="page-header" style="margin-top:30px;border-top:1px solid var(--border);padding-top:20px">
         <div class="page-title" style="font-size:20px">Reconciliation Report</div>
-        <div class="page-sub">For each P/L account that has a hardcoded Excel snapshot, this shows the live aggregate and the variance. Click <strong>+</strong> on a row to expand the contributing live transactions — that's where you'll spot which specific invoice or voucher is causing the gap.</div>
+        <div class="page-sub">For each P/L account that has a hardcoded Excel snapshot, this shows the live aggregate and the variance. Click <strong>+</strong> on a row to expand the contributing live transactions. Or click <strong>Auto-reclass all variances</strong> to post Journal Vouchers that net out each gap to a "9999 Reconciliation Adjustment" balancing account.</div>
+        <div class="page-actions">
+          <button class="btn btn-primary" onclick="smartReclassCombos()">⇄ Smart reclass (known combo invoices)</button>
+          <button class="btn btn-secondary" onclick="autoReclassVariances()">⚖ Balance remaining variances to Adjustment</button>
+        </div>
       </div>
       <div class="card">
         <table>
@@ -1520,15 +1525,25 @@ const CLIENT_SERVICE_LABELS = {
 const _MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 function formatYearEnd(s) {
   if (!s) return '';
-  // Accept "MM-DD", "DD-MM", "MMM DD", "Dec 31" etc.
-  const m1 = /^(\d{1,2})[\s\-/](\d{1,2})$/.exec(s.trim());
-  if (m1) {
-    let mm = parseInt(m1[1],10), dd = parseInt(m1[2],10);
-    // Heuristic: if first part > 12, swap (DD-MM)
-    if (mm > 12 && dd <= 12) { const t=mm; mm=dd; dd=t; }
+  const t = String(s).trim();
+  // Already in our canonical format?
+  if (/^[A-Z][a-z]{2} \d{1,2}$/.test(t)) return t;
+  // 4-digit MMDD without separator (e.g. "1231", "0630")
+  const m4 = /^(\d{2})(\d{2})$/.exec(t);
+  if (m4) {
+    let mm = parseInt(m4[1],10), dd = parseInt(m4[2],10);
+    if (mm > 12 && dd <= 12) { const tmp=mm; mm=dd; dd=tmp; }
     if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) return _MONTH_NAMES[mm-1] + ' ' + dd;
   }
-  const m2 = /^([A-Za-z]{3,})\s*(\d{1,2})$/.exec(s.trim());
+  // MM-DD / MM/DD / MM DD
+  const m1 = /^(\d{1,2})[\s\-/](\d{1,2})$/.exec(t);
+  if (m1) {
+    let mm = parseInt(m1[1],10), dd = parseInt(m1[2],10);
+    if (mm > 12 && dd <= 12) { const tmp=mm; mm=dd; dd=tmp; }
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) return _MONTH_NAMES[mm-1] + ' ' + dd;
+  }
+  // "Dec 31" / "December 31"
+  const m2 = /^([A-Za-z]{3,})\s*(\d{1,2})$/.exec(t);
   if (m2) {
     const idx = _MONTH_NAMES.findIndex(n => n.toLowerCase() === m2[1].toLowerCase().slice(0,3));
     if (idx >= 0) return _MONTH_NAMES[idx] + ' ' + parseInt(m2[2],10);
@@ -1539,7 +1554,18 @@ function formatYearEnd(s) {
 function getAllClientMeta() {
   try {
     const raw = localStorage.getItem(CLIENT_META_KEY);
-    return raw ? JSON.parse(raw) : {};
+    const all = raw ? JSON.parse(raw) : {};
+    // Auto-normalize year_end values (e.g. "1231" -> "Dec 31") so display matches input
+    let changed = false;
+    Object.keys(all).forEach(id => {
+      const m = all[id];
+      if (m && m.year_end) {
+        const fmt = formatYearEnd(m.year_end);
+        if (fmt && fmt !== m.year_end) { m.year_end = fmt; changed = true; }
+      }
+    });
+    if (changed) localStorage.setItem(CLIENT_META_KEY, JSON.stringify(all));
+    return all;
   } catch(e) { return {}; }
 }
 
@@ -3587,8 +3613,29 @@ async function loadGL() {
   if (!ALLOCATIONS || !ALLOCATIONS.length) { try { await loadAllocations(); } catch(e){} }
   augmentInvoicesWithJobType();
 
-  // Build GL from cache
+  // Try to fetch manual journal entries (if backend supports get_gl)
+  let manualJournals = [];
+  try {
+    const jr = await api({ action: 'get_gl' });
+    if (jr && jr.ok && Array.isArray(jr.data)) manualJournals = jr.data;
+  } catch(e) {}
+
+  // Build GL from cache + merge manual journals
   let rows = buildGLFromCache();
+  manualJournals.forEach(j => {
+    rows.push({
+      date: j.date || '',
+      ref: j.ref || j.gl_id || '',
+      description: j.description || '',
+      dr_code: j.dr_code || '',
+      dr_account: j.dr_account || '',
+      cr_code: j.cr_code || '',
+      cr_account: j.cr_account || '',
+      amount: parseFloat(j.amount || 0),
+      source_type: 'journal',
+      gl_id: j.gl_id || j.id,
+    });
+  });
 
   // Apply filters
   if (month)  rows = rows.filter(g => (g.date||'').startsWith(month));
@@ -3799,6 +3846,41 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
   </div>
 </div>
 
+<!-- ══ MODAL: RECLASSIFY ══ -->
+<div class="modal-overlay" id="modal-reclass">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-header">
+      <div class="modal-title">Reclassify Between Accounts</div>
+      <button class="modal-close" onclick="closeModal('modal-reclass')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="background:var(--surface2);padding:10px;border-radius:6px;margin-bottom:14px;font-size:12px;color:var(--text2)">
+        Posts a single Journal Voucher that moves an amount from one COA account to another.
+        Direction (DR / CR) is automatically chosen based on each account's natural side
+        (Asset/Expense = DR-natural, Income/Liability/Equity = CR-natural).
+      </div>
+      <div class="form-grid">
+        <div class="form-field"><label>Date</label><input type="date" id="rcl-date" /></div>
+        <div class="form-field"><label>Reference (optional)</label><input type="text" id="rcl-ref" placeholder="e.g. JV-RECLASS-001" /></div>
+        <div class="form-field form-full">
+          <label>FROM account *</label>
+          <select id="rcl-from"></select>
+        </div>
+        <div class="form-field form-full">
+          <label>TO account *</label>
+          <select id="rcl-to"></select>
+        </div>
+        <div class="form-field"><label>Amount (RM) *</label><input type="number" id="rcl-amount" step="0.01" placeholder="0.00" /></div>
+        <div class="form-field form-full"><label>Description *</label><input type="text" id="rcl-desc" placeholder="e.g. Reclassify INV260105 (250 from FS to MBRS)" /></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('modal-reclass')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveReclassEntry()">Post Reclass</button>
+    </div>
+  </div>
+</div>
+
 <!-- ══ MODAL: JOURNAL ENTRY ══ -->
 <div class="modal-overlay" id="modal-gl">
   <div class="modal" style="max-width:560px">
@@ -3850,6 +3932,86 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
 </div>
 
 <script>
+// ══ GL MANUAL ENTRY + RECLASSIFY ══
+function openReclassModal(prefill) {
+  // Populate FROM/TO COA dropdowns (PL accounts mostly, but allow all)
+  const coa = getCOA();
+  const accts = coa.slice().sort((a,b) => (a.code||'').localeCompare(b.code||''));
+  const opts = '<option value="">-- pick --</option>' + accts.map(a => {
+    const sec = COA_SECTIONS[a.section]||{};
+    return `<option value="${a.code}|${a.name}|${a.section}">${a.code} ${a.name} (${sec.label||''})</option>`;
+  }).join('');
+  document.getElementById('rcl-from').innerHTML = opts;
+  document.getElementById('rcl-to').innerHTML = opts;
+  document.getElementById('rcl-date').value = new Date().toISOString().slice(0,10);
+  document.getElementById('rcl-ref').value = '';
+  document.getElementById('rcl-desc').value = '';
+  document.getElementById('rcl-amount').value = '';
+  if (prefill) {
+    if (prefill.from) document.getElementById('rcl-from').value = prefill.from;
+    if (prefill.to)   document.getElementById('rcl-to').value   = prefill.to;
+    if (prefill.amount) document.getElementById('rcl-amount').value = prefill.amount;
+    if (prefill.desc) document.getElementById('rcl-desc').value = prefill.desc;
+    if (prefill.ref)  document.getElementById('rcl-ref').value  = prefill.ref;
+  }
+  openModal('modal-reclass');
+}
+
+async function saveReclassEntry() {
+  const fromVal = document.getElementById('rcl-from').value;
+  const toVal   = document.getElementById('rcl-to').value;
+  const amount  = parseFloat(document.getElementById('rcl-amount').value);
+  const date    = document.getElementById('rcl-date').value;
+  const desc    = document.getElementById('rcl-desc').value.trim();
+  const ref     = document.getElementById('rcl-ref').value.trim() || ('JV-RECLASS-' + Date.now().toString().slice(-6));
+  if (!fromVal || !toVal || !amount || !date || !desc) { toast('Pick FROM and TO accounts, enter amount, date, description.','error'); return; }
+  if (fromVal === toVal) { toast('FROM and TO accounts must be different.','error'); return; }
+  const [fc, fn, fs] = fromVal.split('|');
+  const [tc, tn, ts] = toVal.split('|');
+  // Determine DR/CR direction based on natural sides:
+  //   "Reclassify FROM A TO B" means: decrease A by amt, increase B by amt
+  //   For DR-natural (assets/expenses): increase = Dr, decrease = Cr
+  //   For CR-natural (income/liab/equity): increase = Cr, decrease = Dr
+  const drNaturalSecs = ['non_current_asset','current_asset','direct_cost','admin_expense','depreciation'];
+  const fromDrNat = drNaturalSecs.includes(fs);
+  const toDrNat   = drNaturalSecs.includes(ts);
+  // To DECREASE FROM: opposite of its natural side
+  // To INCREASE TO:   its natural side
+  // JV needs single Dr / single Cr — we already have those
+  let drCode, drName, crCode, crName;
+  if (fromDrNat) {
+    // From DR-natural: decrease = Cr
+    crCode = fc; crName = fn;
+  } else {
+    // From CR-natural: decrease = Dr
+    drCode = fc; drName = fn;
+  }
+  if (toDrNat) {
+    // To DR-natural: increase = Dr
+    drCode = tc; drName = tn;
+  } else {
+    // To CR-natural: increase = Cr
+    crCode = tc; crName = tn;
+  }
+  // If both same side, the previous logic might leave one slot empty; fix:
+  if (!drCode || !drName) { drCode = fromDrNat ? tc : fc; drName = fromDrNat ? tn : fn; }
+  if (!crCode || !crName) { crCode = fromDrNat ? fc : tc; crName = fromDrNat ? fn : tn; }
+  const data = {
+    date, ref, description: desc,
+    dr_code: drCode, dr_account: drName,
+    cr_code: crCode, cr_account: crName,
+    amount, source_type: 'journal',
+  };
+  const res = await api({ action: 'save_gl', data });
+  if (res && res.ok) {
+    toast(`Reclass posted: Dr ${drCode} ${drName} / Cr ${crCode} ${crName} RM ${amount}`,'success');
+    closeModal('modal-reclass');
+    loadGL();
+  } else {
+    toast(res.error || 'Failed to post reclass.','error');
+  }
+}
+
 // ══ GL MANUAL ENTRY ══
 function openGLModal() {
   document.getElementById('gl-date').value = new Date().toISOString().slice(0,10);
@@ -4793,6 +4955,159 @@ function toggleReconRow(id) {
   const r = document.getElementById(id);
   if (!r) return;
   r.style.display = r.style.display === 'none' ? '' : 'none';
+}
+
+// Known multi-category invoices from S 25.4.2026.xlsx GL 2026 — each was billed under
+// one job_type but Excel splits the amount across two categories.
+// "from" = the category currently tagged on the invoice (whole amount lands there).
+// "to"   = the OTHER category that should receive `amount`.
+const KNOWN_COMBO_RECLASSES = [
+  { inv_no:'INV260105', from_jt:'fs',    to_jt:'mbrs',  amount:250, note:'INV260105: split MBRS 250 + FS 750' },
+  { inv_no:'INV260305', from_jt:'cosec', to_jt:'mbrs',  amount:300, note:'INV260305: split MBRS 300 + Cosec 370' },
+  { inv_no:'INV260306', from_jt:'mbrs',  to_jt:'cosec', amount:270, note:'INV260306: split MBRS 275 + Cosec 270' },
+  { inv_no:'INV260407', from_jt:'fs',    to_jt:'mbrs',  amount:250, note:'INV260407: split MBRS 250 + FS 750' },
+];
+
+async function smartReclassCombos() {
+  const coa = getCOA();
+  const findAcct = (jt) => coa.find(a => {
+    const sec = COA_SECTIONS[a.section]||{};
+    if (sec.statement !== 'PL' || sec.side !== 'income') return false;
+    return (a.mapsFrom||[]).map(s => (s||'').toLowerCase()).includes(jt.toLowerCase());
+  });
+
+  const proposals = [];
+  for (const r of KNOWN_COMBO_RECLASSES) {
+    const fromAcct = findAcct(r.from_jt);
+    const toAcct   = findAcct(r.to_jt);
+    if (!fromAcct || !toAcct) {
+      console.warn(`Skipping ${r.inv_no}: COA account not found for ${r.from_jt} or ${r.to_jt}`);
+      continue;
+    }
+    proposals.push({ ...r, fromAcct, toAcct });
+  }
+
+  if (!proposals.length) { toast('No matchable combo invoices in your COA.','error'); return; }
+
+  const summary = proposals.map(p =>
+    `  ${p.inv_no}: ${p.amount.toFixed(2)} from ${p.fromAcct.code} ${p.fromAcct.name} → ${p.toAcct.code} ${p.toAcct.name}`
+  ).join('\n');
+  if (!confirm(`Smart reclass ${proposals.length} combo invoice(s)?\n\n${summary}\n\nEach posts a JV that moves the amount between revenue accounts. Total revenue UNCHANGED. Run only ONCE per period.`)) return;
+
+  let ok = 0, fail = 0;
+  const today = new Date().toISOString().slice(0,10);
+  for (const p of proposals) {
+    // Both accounts are income (CR-natural):
+    //   Decrease FROM: Dr fromAcct
+    //   Increase TO:   Cr toAcct
+    const data = {
+      date: today,
+      ref: 'JV-COMBO-' + p.inv_no,
+      description: 'Reclass — ' + p.note,
+      dr_code: p.fromAcct.code,
+      dr_account: p.fromAcct.name,
+      cr_code: p.toAcct.code,
+      cr_account: p.toAcct.name,
+      amount: p.amount,
+      source_type: 'journal',
+    };
+    const res = await api({ action: 'save_gl', data });
+    if (res && res.ok) { ok++; console.log(`✓ ${p.inv_no}: ${p.fromAcct.code} → ${p.toAcct.code}`); }
+    else { fail++; console.error(`✗ ${p.inv_no}:`, res); }
+    await new Promise(r => setTimeout(r, 200));
+  }
+  if (fail === 0) toast(`Posted ${ok} combo reclass JVs. Refresh GL to see them.`,'success');
+  else toast(`Posted ${ok}, failed ${fail}. Check console.`,'error');
+  renderCOAAudit();
+}
+
+async function autoReclassVariances() {
+  const yr = document.getElementById('coa-audit-year')?.value || String(new Date().getFullYear());
+  const inYr = d => !yr || (d||'').startsWith(yr);
+  const invoices = (INVOICES||[]).filter(i => i.status !== 'cancelled' && inYr(i.inv_date||i.date||''));
+  const vouchers = (VOUCHERS||[]).filter(v => inYr(v.date||'') && !isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__'));
+
+  const coa = getCOA();
+  const plAccts = coa.filter(a => COA_PL_ORDER.includes(a.section));
+  const reclasses = [];
+  plAccts.forEach(a => {
+    const hasSnap = a.value !== undefined && a.value !== null && a.value !== '';
+    if (!hasSnap) return;
+    const snap = parseFloat(a.value);
+    let live = 0;
+    if (a.mapsFrom && a.mapsFrom.length) {
+      const set = new Set(a.mapsFrom.map(s => (s||'').toLowerCase()));
+      const sec = COA_SECTIONS[a.section] || {};
+      if (sec.side === 'income') {
+        if (set.has('disbursements_field')) live += invoices.reduce((s,i) => s + parseFloat(i.disb_amount||0), 0);
+        live += invoices.filter(i => set.has(getInvJobType(i).toLowerCase())).reduce((s,i) => s + parseFloat(i.amount||0), 0);
+      } else if (sec.side === 'expense') {
+        live += vouchers.filter(v => set.has((v.category||'').toLowerCase())).reduce((s,v) => s + parseFloat(v.amount||0), 0);
+      }
+    }
+    live = r2(live);
+    const variance = r2(live - snap);
+    if (Math.abs(variance) > 0.01) {
+      reclasses.push({ acct: a, snap, live, variance });
+    }
+  });
+
+  if (!reclasses.length) {
+    toast('No variances to reclass — every account already tallies to its snapshot.','success');
+    return;
+  }
+
+  const lines = reclasses.map(r =>
+    `  ${r.acct.code} ${r.acct.name}: ${r.variance > 0 ? '+' : ''}${r.variance.toFixed(2)} (live ${r.live.toFixed(2)} vs snap ${r.snap.toFixed(2)})`
+  ).join('\n');
+  if (!confirm(`Auto-reclass ${reclasses.length} variance(s) via Journal Vouchers?\n\n${lines}\n\nEach variance posts a JV with the balancing leg to a "9999 Reconciliation Adjustment" account. After posting, refresh the GL — JVs will appear there. Run only ONCE per period (re-running posts duplicate JVs).`)) return;
+
+  let ok = 0, fail = 0;
+  const today = new Date().toISOString().slice(0,10);
+  for (const r of reclasses) {
+    const sec = COA_SECTIONS[r.acct.section] || {};
+    const isIncome = sec.side === 'income';
+    // For income (CR-natural), an "over" (variance > 0) means live credit is too large → debit account, credit adjustment
+    // For income, "under" → credit account, debit adjustment
+    // For expense (DR-natural), "over" → credit account, debit adjustment ; "under" → debit account, credit adjustment
+    const amt = Math.abs(r.variance);
+    let drCode, drName, crCode, crName;
+    if (isIncome) {
+      if (r.variance > 0) {
+        drCode = r.acct.code; drName = r.acct.name;
+        crCode = '9999';      crName = 'Reconciliation Adjustment';
+      } else {
+        drCode = '9999';      drName = 'Reconciliation Adjustment';
+        crCode = r.acct.code; crName = r.acct.name;
+      }
+    } else {
+      if (r.variance > 0) {
+        drCode = '9999';      drName = 'Reconciliation Adjustment';
+        crCode = r.acct.code; crName = r.acct.name;
+      } else {
+        drCode = r.acct.code; drName = r.acct.name;
+        crCode = '9999';      crName = 'Reconciliation Adjustment';
+      }
+    }
+    const data = {
+      date: today,
+      ref: 'JV-RECON-' + r.acct.code,
+      description: `Reconciliation reclass — ${r.acct.code} ${r.acct.name} (live ${r.live.toFixed(2)} → snap ${r.snap.toFixed(2)})`,
+      dr_code: drCode,
+      dr_account: drName,
+      cr_code: crCode,
+      cr_account: crName,
+      amount: amt,
+      source_type: 'journal',
+    };
+    const res = await api({ action: 'save_gl', data });
+    if (res && res.ok) ok++;
+    else { fail++; console.error('Reclass JV failed for ' + r.acct.code + ':', res); }
+    await new Promise(r => setTimeout(r, 200));
+  }
+  if (fail === 0) toast(`Posted ${ok} reconciliation JVs. Refresh the GL to see them.`, 'success');
+  else toast(`Posted ${ok}, failed ${fail}. Check console for details.`, 'error');
+  renderCOAAudit();
 }
 
 let _coaEditOrigCode = null;
