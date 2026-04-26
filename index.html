@@ -1472,13 +1472,29 @@ const COA_OPENING_BALANCES = {
   '3300': { date: '2026-01-01', amount:  610.69, note: 'Drawings b/f from FY25' },
 };
 
-function openAccountDrill(code) {
+async function openAccountDrill(code) {
+  // Open modal immediately so the user sees feedback even if data needs to load
+  openModal('modal-account-drill');
+  document.getElementById('drill-title').textContent = 'Loading…';
+  document.getElementById('drill-summary').innerHTML = '';
+  document.getElementById('drill-tbody').innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">Loading transactions…</td></tr>';
+
   const coa = getCOA();
   const acct = coa.find(a => a.code === code);
-  if (!acct) return;
+  if (!acct) {
+    document.getElementById('drill-title').textContent = 'Account not found';
+    document.getElementById('drill-tbody').innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">Code ' + code + ' is not in your Chart of Accounts.</td></tr>';
+    return;
+  }
 
   const sec = COA_SECTIONS[acct.section] || {};
   const isBS = sec.statement === 'BS';
+
+  // Ensure invoices/receipts/vouchers are loaded
+  try {
+    if (!INVOICES || !INVOICES.length) await loadInvoices();
+    if (!VOUCHERS || !VOUCHERS.length || !RECEIPTS || !RECEIPTS.length) await prefetchGlobals();
+  } catch (e) { console.warn('drill-down data load failed', e); }
 
   const invoices = (INVOICES||[]).filter(i => i.status !== 'cancelled');
   const receipts = (RECEIPTS||[]);
@@ -1496,6 +1512,15 @@ function openAccountDrill(code) {
         amount: ob.amount
       });
     }
+  }
+
+  // 1b) Excel snapshot value (if account has a hardcoded value, show it as a synthetic row)
+  if (acct.value !== undefined && acct.value !== null && acct.value !== '') {
+    txns.push({
+      date: '', ref: 'SNAP', type: 'SNAP',
+      description: 'Excel snapshot value (hardcoded — overrides live aggregation)',
+      amount: parseFloat(acct.value)
+    });
   }
 
   // 2) Live transactions based on COA mapping & special account roles
@@ -3221,6 +3246,7 @@ async function loadGL() {
   if (acctFilter === 'income')  rows = rows.filter(g => g.source_type === 'invoice');
 
   GL_ALL_ROWS = rows;
+  populateGLAccountFilter();
 
   // Populate month filter from data (once)
   const monthSel = document.getElementById('gl-filter-month');
@@ -3526,9 +3552,44 @@ function filterGLByAccount() {
                                      /wages|salary|subcon|transport|printing|entertain|bank.charge|software|ssm|courier|telephone|commission|general/i.test(drName);
     if (filter === 'income')  return crCode.startsWith('4') ||
                                      /revenue|fee|income|professional/i.test(crName);
+    // Specific account name match (prefix "acct:")
+    if (filter.startsWith('acct:')) {
+      const target = filter.slice(5).toLowerCase();
+      return drName === target || crName === target;
+    }
     return true;
   });
   renderGLRows(filtered);
+}
+
+// Populate the GL account filter dropdown with distinct account names from GL data
+function populateGLAccountFilter() {
+  const sel = document.getElementById('gl-filter-account');
+  if (!sel || !GL_ALL_ROWS.length) return;
+  const current = sel.value;
+  // Collect distinct account names + their total amount across rows
+  const acctMap = {};
+  GL_ALL_ROWS.forEach(g => {
+    const dr = (g.dr_account||'').trim();
+    const cr = (g.cr_account||'').trim();
+    const amt = parseFloat(g.amount||0);
+    if (dr) { if (!acctMap[dr]) acctMap[dr] = {dr:0, cr:0}; acctMap[dr].dr += amt; }
+    if (cr) { if (!acctMap[cr]) acctMap[cr] = {dr:0, cr:0}; acctMap[cr].cr += amt; }
+  });
+  // Remove any previously appended <option class="acct"> entries
+  Array.from(sel.options).forEach(o => { if (o.dataset.dynamic) sel.removeChild(o); });
+  // Add separator + each account
+  const sep = document.createElement('option');
+  sep.disabled = true; sep.dataset.dynamic = '1'; sep.textContent = '──── Specific accounts ────';
+  sel.appendChild(sep);
+  Object.keys(acctMap).sort((a,b) => a.localeCompare(b)).forEach(name => {
+    const opt = document.createElement('option');
+    opt.value = 'acct:' + name.toLowerCase();
+    opt.dataset.dynamic = '1';
+    opt.textContent = name;
+    sel.appendChild(opt);
+  });
+  if (current) sel.value = current;
 }
 
 function sortAndRenderGL() {
@@ -3889,7 +3950,8 @@ async function loadSalesAnalysis() {
   const billerMap = {};
   data.forEach(i => { const b=i.billing_party||'Direct'; billerMap[b]=(billerMap[b]||0)+parseFloat(i.amount||0); });
   const maxBiller = Object.entries(billerMap).sort((a,b)=>b[1]-a[1]);
-  document.getElementById('sa-top-biller').textContent = maxBiller[0] ? maxBiller[0][0].split(' ')[0] : '—';
+  const truncName = (s, n) => { s = (s||'').toString(); return s.length > n ? s.slice(0,n-1)+'…' : s; };
+  document.getElementById('sa-top-biller').textContent = maxBiller[0] ? truncName(maxBiller[0][0], 22) : '—';
 
   document.getElementById('sa-by-biller').innerHTML = maxBiller.map(([k,v]) => `
     <div style="margin-bottom:12px">
@@ -3900,15 +3962,39 @@ async function loadSalesAnalysis() {
       <div style="font-size:11px;color:var(--text3);margin-top:2px">${total?(v/total*100).toFixed(1):0}% of total</div>
     </div>`).join('');
 
-  // By job type — use same friendly labels + order as IS
+  // By revenue COA account — total tallies with Income Statement
+  const coa = getCOA();
+  const revAccts = coa.filter(a => {
+    const sec = COA_SECTIONS[a.section]||{};
+    return sec.statement === 'PL' && sec.side === 'income';
+  });
+  // Build job_type → COA account name lookup
+  const jtToAcct = {};
+  let disbAcctName = null;
+  revAccts.forEach(a => {
+    if (!a.mapsFrom) return;
+    a.mapsFrom.forEach(t => {
+      const k = (t||'').toLowerCase();
+      if (k === 'disbursements_field') disbAcctName = a.name;
+      else jtToAcct[k] = a.name;
+    });
+  });
   const typeMap = {};
   data.forEach(i => {
-    const raw = (i.job_type||'other').toLowerCase();
-    const lbl = JOB_LABELS[raw] || i.job_type || 'Other';
+    const k = (i.job_type||'').toLowerCase();
+    const lbl = jtToAcct[k] || (i.job_type ? i.job_type : 'Unmapped');
     typeMap[lbl] = (typeMap[lbl]||0) + parseFloat(i.amount||0);
+    const disb = parseFloat(i.disb_amount||0);
+    if (disb > 0.005 && disbAcctName) {
+      typeMap[disbAcctName] = (typeMap[disbAcctName]||0) + disb;
+    }
   });
-  const maxType = IS_REV_ORDER.filter(k=>typeMap[k]).map(k=>[k,typeMap[k]])
-    .concat(Object.entries(typeMap).filter(([k])=>!IS_REV_ORDER.includes(k)).sort((a,b)=>b[1]-a[1]));
+  // Order accounts by their COA code; unmapped at the end
+  const maxType = revAccts
+    .filter(a => typeMap[a.name])
+    .sort((a,b) => (a.code||'').localeCompare(b.code||''))
+    .map(a => [a.name, typeMap[a.name]])
+    .concat(Object.entries(typeMap).filter(([k]) => !revAccts.some(a => a.name === k)).sort((a,b) => b[1]-a[1]));
   document.getElementById('sa-by-type').innerHTML = maxType.map(([k,v]) => `
     <div style="margin-bottom:12px">
       <div style="display:flex;justify-content:space-between;font-size:13px">
@@ -3926,7 +4012,7 @@ async function loadSalesAnalysis() {
     clientMap[k].count++; clientMap[k].rev += parseFloat(i.amount||0);
   });
   const maxClient = Object.entries(clientMap).sort((a,b)=>b[1].rev-a[1].rev);
-  document.getElementById('sa-top-client').textContent = maxClient[0] ? maxClient[0][0].split(' ')[0] : '—';
+  document.getElementById('sa-top-client').textContent = maxClient[0] ? truncName(maxClient[0][0], 22) : '—';
   document.getElementById('sa-client-tbody').innerHTML = maxClient.map(([k,v]) => `
     <tr>
       <td><strong>${k}</strong></td>
