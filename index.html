@@ -1206,6 +1206,7 @@ async function prefetchGlobals() {
   if (!VOUCHERS.length) {
     const r = await api({action:'get_vouchers'});
     if (r.ok) VOUCHERS = (r.data||[]).filter(v => !isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__'));
+  augmentInvoicesWithJobType();
   }
   if (!RECEIPTS.length) {
     const r = await api({action:'get_receipts'});
@@ -1457,6 +1458,26 @@ function computeAccountValue(acct, invoices, vouchers) {
   return r2(sum);
 }
 
+// Backend invoice records don't have a job_type field — it lives on the allocation.
+// This helper copies job_type from ALLOCATIONS into INVOICES (in memory) so all the
+// reporting code that reads i.job_type works correctly.
+function augmentInvoicesWithJobType() {
+  if (!Array.isArray(window.INVOICES) || !Array.isArray(window.ALLOCATIONS)) return;
+  if (!INVOICES.length || !ALLOCATIONS.length) return;
+  const jtMap = {};
+  ALLOCATIONS.forEach(a => {
+    const k = (a.inv_no||'').toString().trim();
+    const v = (a.job_type||'').toString().trim();
+    if (k && v) jtMap[k] = v;
+  });
+  INVOICES.forEach(i => {
+    if (!i.job_type || !String(i.job_type).trim()) {
+      const k = (i.inv_no||'').toString().trim();
+      if (k && jtMap[k]) i.job_type = jtMap[k];
+    }
+  });
+}
+
 // ══════════════════════════════════════════════════
 // ACCOUNT DRILL-DOWN — click any BS/IS line to see underlying transactions
 // ══════════════════════════════════════════════════
@@ -1491,11 +1512,13 @@ async function openAccountDrill(code) {
   const sec = COA_SECTIONS[acct.section] || {};
   const isBS = sec.statement === 'BS';
 
-  // Ensure invoices/receipts/vouchers are loaded
+  // Ensure invoices/receipts/vouchers/allocations are loaded
   try {
     if (!INVOICES || !INVOICES.length) await loadInvoices();
     if (!VOUCHERS || !VOUCHERS.length || !RECEIPTS || !RECEIPTS.length) await prefetchGlobals();
+    if (!ALLOCATIONS || !ALLOCATIONS.length) await loadAllocations();
   } catch (e) { console.warn('drill-down data load failed', e); }
+  augmentInvoicesWithJobType();
 
   const invoices = (INVOICES||[]).filter(i => i.status !== 'cancelled');
   const receipts = (RECEIPTS||[]);
@@ -3260,12 +3283,14 @@ function buildGLFromCache() {
 async function loadGL() {
   const month  = document.getElementById('gl-filter-month').value;
   const source = document.getElementById('gl-filter-source').value;
-  document.getElementById('gl-tbody').innerHTML = '<tr class="loading-row"><td colspan="7">Loading GL…</td></tr>';
+  document.getElementById('gl-tbody').innerHTML = '<tr class="loading-row"><td colspan="8">Loading GL…</td></tr>';
 
   // Ensure caches are populated
   if (!INVOICES.length) await loadInvoices();
   if (!RECEIPTS.length) await prefetchGlobals();
   if (!VOUCHERS.length) await prefetchGlobals();
+  if (!ALLOCATIONS || !ALLOCATIONS.length) { try { await loadAllocations(); } catch(e){} }
+  augmentInvoicesWithJobType();
 
   // Build GL from cache
   let rows = buildGLFromCache();
@@ -3830,6 +3855,9 @@ async function loadIncomeStatement() {
   const year = document.getElementById('is-filter-year').value;
   const invoicesAll = INVOICES.length ? INVOICES : (await api({action:'get_invoices'})).data || [];
   const vouchersAll = VOUCHERS.length ? VOUCHERS : (await api({action:'get_vouchers'})).data || [];
+  // Ensure invoices have job_type populated from allocations
+  if (!ALLOCATIONS || !ALLOCATIONS.length) { try { await loadAllocations(); } catch(e){} }
+  augmentInvoicesWithJobType();
 
   const yearSel = document.getElementById('is-filter-year');
   if (yearSel.options.length <= 1) {
@@ -4083,6 +4111,8 @@ async function loadSalesAnalysis() {
   const biller = document.getElementById('sa-filter-biller').value;
   // Use cached INVOICES — avoids extra API call
   const allInv = INVOICES.length ? INVOICES : ((await api({action:'get_invoices'})).data || []);
+  if (!ALLOCATIONS || !ALLOCATIONS.length) { try { await loadAllocations(); } catch(e){} }
+  augmentInvoicesWithJobType();
 
   let data = allInv.filter(i => i.status !== 'cancelled');
   if (year)   data = data.filter(i => (i.inv_date||i.date||'').startsWith(year));
@@ -4254,6 +4284,7 @@ function loadCOA() {
   const fmt = n => parseFloat(n||0).toLocaleString('en-MY',{minimumFractionDigits:2,maximumFractionDigits:2});
 
   // Compute live values for every account so we can show them on the page
+  augmentInvoicesWithJobType();
   const invoices = (INVOICES||[]).filter(i => i.status !== 'cancelled');
   const vouchers = (VOUCHERS||[]).filter(v => !isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__'));
 
