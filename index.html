@@ -783,6 +783,30 @@
           <tbody id="coa-tbody"></tbody>
         </table>
       </div>
+
+      <div class="page-header" style="margin-top:30px;border-top:1px solid var(--border);padding-top:20px">
+        <div class="page-title" style="font-size:20px">Live Data Audit</div>
+        <div class="page-sub">Every distinct invoice <code>job_type</code> and voucher <code>category</code> present in your live data, with current FY totals. Rows in amber are NOT covered by any COA <code>mapsFrom</code> — these transactions show up as "Other" on the P/L. Fix by either editing the COA mapping or editing the offending invoice/voucher.</div>
+        <div class="page-actions">
+          <select id="coa-audit-year" class="filter-select" onchange="renderCOAAudit()"></select>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+        <div class="card">
+          <div class="card-header"><div class="card-title">Invoice job_type</div></div>
+          <table>
+            <thead><tr><th>job_type</th><th>Count</th><th style="text-align:right">Amount (RM)</th><th>Mapped to</th></tr></thead>
+            <tbody id="coa-audit-jt-tbody"></tbody>
+          </table>
+        </div>
+        <div class="card">
+          <div class="card-header"><div class="card-title">Voucher category</div></div>
+          <table>
+            <thead><tr><th>category</th><th>Count</th><th style="text-align:right">Amount (RM)</th><th>Mapped to</th></tr></thead>
+            <tbody id="coa-audit-cat-tbody"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
   </div><!-- end main -->
@@ -3380,6 +3404,14 @@ async function loadIncomeStatement() {
   if (yearSel.options.length <= 1) {
     const years = [...new Set(invoicesAll.map(i=>(i.inv_date||i.date||'').slice(0,4)).filter(Boolean))].sort().reverse();
     years.forEach(y => { const o = document.createElement('option'); o.value=y; o.textContent=y; yearSel.appendChild(o); });
+    // Default to current year so 2025 carry-forward doesn't pollute 2026 P/L
+    const currentYear = String(new Date().getFullYear());
+    if (years.includes(currentYear)) { yearSel.value = currentYear; }
+  }
+  const year2 = yearSel.value;
+  if (year2 && year2 !== year) {
+    // Re-pick using updated default
+    return loadIncomeStatement();
   }
 
   const filterYear = y => !year || (y||'').startsWith(year);
@@ -3454,14 +3486,14 @@ async function loadIncomeStatement() {
     if (!accts.length) return '';
     const rows = accts.map(a => ({ a, v: computeAccountValue(a, invoices, vouchers) }))
       .sort((x,y) => (x.a.code||'').localeCompare(y.a.code||''));
-    const visible = rows.filter(({v}) => Math.abs(v) > 0.005);
-    if (!visible.length) return '';
     let html = `<div class="fin-section-title" style="margin-top:8px">${label}</div>`;
-    visible.forEach(({a,v}) => {
+    // Show ALL accounts in the section (even zero) so structure is always visible
+    rows.forEach(({a,v}) => {
       const codeBadge = a.code ? `<span style="color:var(--text3);font-family:'DM Mono',monospace;font-size:11px;margin-right:6px">${a.code}</span>` : '';
       const valStr = isExpense ? `(${fmt(v)})` : fmt(v);
       const cls    = isExpense ? 'fin-amt fin-neg' : 'fin-amt';
-      html += `<div class="fin-row indent"><span>${codeBadge}${a.name}</span><span class="${cls}">${valStr}</span></div>`;
+      const dim    = Math.abs(v) < 0.005 ? 'opacity:0.45' : '';
+      html += `<div class="fin-row indent" style="${dim}"><span>${codeBadge}${a.name}</span><span class="${cls}">${valStr}</span></div>`;
     });
     const subTotal = sectionTotals[sectionKey];
     const stStr    = isExpense ? `(${fmt(subTotal)})` : fmt(subTotal);
@@ -3532,14 +3564,14 @@ async function loadBalanceSheet() {
     .reduce((s,i) => s + parseFloat(i.amount_outstanding || i.amount || 0), 0));
 
   const valueOf = (a) => {
-    // Hardcoded value takes priority if explicitly set (and no live mapping defined)
+    // Priority: live mapsFrom > hardcoded value > derived source.
+    // This means a hardcoded Excel snapshot ALWAYS wins over auto-computed source unless mapsFrom is set.
+    if (a.mapsFrom && a.mapsFrom.length) return computeAccountValue(a, invoices, vouchers);
     const hasValue = a.value !== undefined && a.value !== null && a.value !== '';
-    const hasLive  = (a.mapsFrom && a.mapsFrom.length) || a.source;
-    if (hasValue && !hasLive) return parseFloat(a.value);
-    if (a.mapsFrom && a.mapsFrom.length)           return computeAccountValue(a, invoices, vouchers);
+    if (hasValue) return parseFloat(a.value);
     if (a.source === 'pl_net_profit')              return plNetProfit;
     if (a.source === 'live_outstanding_invoices')  return liveDebtors;
-    return parseFloat(a.value || 0);
+    return 0;
   };
 
   const bsAccts = {};
@@ -3786,6 +3818,70 @@ function loadCOA() {
   });
   if (!html) html = '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">No accounts. Click "+ Add Account" to start.</td></tr>';
   document.getElementById('coa-tbody').innerHTML = html;
+
+  // Populate audit year filter and render audit panel
+  const yrSel = document.getElementById('coa-audit-year');
+  if (yrSel && yrSel.options.length === 0) {
+    const allInv = INVOICES || [];
+    const years = [...new Set(allInv.map(i=>(i.inv_date||i.date||'').slice(0,4)).filter(Boolean))].sort().reverse();
+    const opt = document.createElement('option'); opt.value=''; opt.textContent='All time'; yrSel.appendChild(opt);
+    years.forEach(y => { const o = document.createElement('option'); o.value=y; o.textContent=y; yrSel.appendChild(o); });
+    yrSel.value = String(new Date().getFullYear());
+  }
+  renderCOAAudit();
+}
+
+function renderCOAAudit() {
+  const coa = getCOA();
+  const yr  = (document.getElementById('coa-audit-year')||{}).value || '';
+  const inYr = d => !yr || (d||'').startsWith(yr);
+  const invoices = (INVOICES||[]).filter(i => i.status !== 'cancelled' && inYr(i.inv_date||i.date||''));
+  const vouchers = (VOUCHERS||[]).filter(v => inYr(v.date||'') && !isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__'));
+
+  // Build map: jt → {coa account name | 'unmapped'}
+  const jtToAcct = {}, catToAcct = {};
+  coa.forEach(a => {
+    if (!a.mapsFrom) return;
+    const sec = COA_SECTIONS[a.section] || {};
+    a.mapsFrom.forEach(t => {
+      const k = (t||'').toLowerCase();
+      if (sec.side === 'income')  jtToAcct[k]  = `${a.code} ${a.name}`;
+      else if (sec.side === 'expense') catToAcct[k] = `${a.code} ${a.name}`;
+    });
+  });
+
+  // Aggregate live by job_type
+  const jtAgg = {};
+  invoices.forEach(i => {
+    const k = (i.job_type||'(blank)').toString();
+    if (!jtAgg[k]) jtAgg[k] = {count:0, sum:0};
+    jtAgg[k].count++;
+    jtAgg[k].sum += parseFloat(i.amount||0);
+  });
+  // Aggregate live by category
+  const catAgg = {};
+  vouchers.forEach(v => {
+    const k = (v.category||'(blank)').toString();
+    if (!catAgg[k]) catAgg[k] = {count:0, sum:0};
+    catAgg[k].count++;
+    catAgg[k].sum += parseFloat(v.amount||0);
+  });
+
+  const fmt = n => parseFloat(n||0).toLocaleString('en-MY',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const rowHtml = (k, v, mapped) => {
+    const amber = mapped ? '' : 'background:var(--amber-bg)';
+    const m     = mapped || '<span style="color:var(--amber);font-weight:600">UNMAPPED</span>';
+    return `<tr style="${amber}"><td style="font-family:'DM Mono',monospace">${k}</td><td>${v.count}</td><td style="text-align:right;font-family:'DM Mono',monospace">${fmt(v.sum)}</td><td style="font-size:12px">${m}</td></tr>`;
+  };
+
+  const jtRows = Object.entries(jtAgg).sort((a,b) => b[1].sum - a[1].sum)
+    .map(([k,v]) => rowHtml(k, v, jtToAcct[k.toLowerCase()])).join('') ||
+    '<tr><td colspan="4" style="text-align:center;color:var(--text3);padding:20px">No invoices in this year</td></tr>';
+  const catRows = Object.entries(catAgg).sort((a,b) => b[1].sum - a[1].sum)
+    .map(([k,v]) => rowHtml(k, v, catToAcct[k.toLowerCase()])).join('') ||
+    '<tr><td colspan="4" style="text-align:center;color:var(--text3);padding:20px">No vouchers in this year</td></tr>';
+  document.getElementById('coa-audit-jt-tbody').innerHTML  = jtRows;
+  document.getElementById('coa-audit-cat-tbody').innerHTML = catRows;
 }
 
 let _coaEditOrigCode = null;
