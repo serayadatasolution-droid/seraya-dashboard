@@ -1462,7 +1462,8 @@ function computeAccountValue(acct, invoices, vouchers) {
 // This helper copies job_type from ALLOCATIONS into INVOICES (in memory) so all the
 // reporting code that reads i.job_type works correctly.
 function augmentInvoicesWithJobType() {
-  if (!Array.isArray(window.INVOICES) || !Array.isArray(window.ALLOCATIONS)) return;
+  if (typeof INVOICES === 'undefined' || typeof ALLOCATIONS === 'undefined') return;
+  if (!Array.isArray(INVOICES) || !Array.isArray(ALLOCATIONS)) return;
   if (!INVOICES.length || !ALLOCATIONS.length) return;
   const jtMap = {};
   ALLOCATIONS.forEach(a => {
@@ -1485,7 +1486,9 @@ function augmentInvoicesWithJobType() {
 let __jtCache = null;  // memoized inv_no → job_type map; reset on invoice/allocation load
 function _rebuildJtCache() {
   __jtCache = {};
-  (window.ALLOCATIONS || []).forEach(a => {
+  // ALLOCATIONS is `let`-declared so it's not on window — must reference by bare name
+  const allocs = (typeof ALLOCATIONS !== 'undefined' && Array.isArray(ALLOCATIONS)) ? ALLOCATIONS : [];
+  allocs.forEach(a => {
     const k = (a.inv_no||'').toString().trim();
     const v = (a.job_type||'').toString().trim();
     if (k && v && !__jtCache[k]) __jtCache[k] = v;
