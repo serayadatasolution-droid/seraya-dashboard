@@ -4076,33 +4076,65 @@ function filterGLByAccount() {
   renderGLRows(filtered);
 }
 
-// Populate the GL account filter dropdown with distinct account names from GL data
+// Populate the GL account filter dropdown with EVERY COA account + any extra names
+// found in GL data (e.g. legacy names from buildGLFromCache fallbacks). Each option
+// shows an activity badge so user can see at a glance which accounts have entries.
 function populateGLAccountFilter() {
   const sel = document.getElementById('gl-filter-account');
-  if (!sel || !GL_ALL_ROWS.length) return;
+  if (!sel) return;
   const current = sel.value;
-  // Collect distinct account names + their total amount across rows
-  const acctMap = {};
-  GL_ALL_ROWS.forEach(g => {
+
+  // Collect distinct names + counts/sums from current GL_ALL_ROWS
+  const acctMap = {};   // name -> {count, total}
+  (GL_ALL_ROWS||[]).forEach(g => {
     const dr = (g.dr_account||'').trim();
     const cr = (g.cr_account||'').trim();
     const amt = parseFloat(g.amount||0);
-    if (dr) { if (!acctMap[dr]) acctMap[dr] = {dr:0, cr:0}; acctMap[dr].dr += amt; }
-    if (cr) { if (!acctMap[cr]) acctMap[cr] = {dr:0, cr:0}; acctMap[cr].cr += amt; }
+    [dr, cr].forEach(n => {
+      if (!n) return;
+      if (!acctMap[n]) acctMap[n] = { count: 0, total: 0 };
+      acctMap[n].count++; acctMap[n].total += amt;
+    });
   });
-  // Remove any previously appended <option class="acct"> entries
+
+  // Add ALL COA accounts (so user can find them even if no entries)
+  let coa = [];
+  try { coa = getCOA(); } catch(e) {}
+  const coaNames = new Set();
+  coa.forEach(a => {
+    const name = (a.code ? a.code + ' ' : '') + (a.name || '');
+    if (!acctMap[name]) acctMap[name] = { count: 0, total: 0, coa: true };
+    else acctMap[name].coa = true;
+    coaNames.add(name);
+  });
+
+  // Remove previously appended dynamic options
   Array.from(sel.options).forEach(o => { if (o.dataset.dynamic) sel.removeChild(o); });
-  // Add separator + each account
-  const sep = document.createElement('option');
-  sep.disabled = true; sep.dataset.dynamic = '1'; sep.textContent = '──── Specific accounts ────';
-  sel.appendChild(sep);
-  Object.keys(acctMap).sort((a,b) => a.localeCompare(b)).forEach(name => {
-    const opt = document.createElement('option');
-    opt.value = 'acct:' + name.toLowerCase();
-    opt.dataset.dynamic = '1';
-    opt.textContent = name;
-    sel.appendChild(opt);
+
+  // Group: COA accounts first (sorted by code), then any extra names not in COA (legacy fallbacks)
+  const groups = [
+    { label: '──── COA accounts ────', filter: n => acctMap[n].coa },
+    { label: '──── Other (legacy / unmapped) ────', filter: n => !acctMap[n].coa },
+  ];
+
+  groups.forEach(grp => {
+    const names = Object.keys(acctMap).filter(grp.filter).sort((a,b) => a.localeCompare(b));
+    if (!names.length) return;
+    const sep = document.createElement('option');
+    sep.disabled = true; sep.dataset.dynamic = '1'; sep.textContent = grp.label;
+    sel.appendChild(sep);
+    names.forEach(name => {
+      const opt = document.createElement('option');
+      opt.value = 'acct:' + name.toLowerCase();
+      opt.dataset.dynamic = '1';
+      const m = acctMap[name];
+      opt.textContent = m.count > 0
+        ? `${name}  · ${m.count} entries · RM ${m.total.toLocaleString('en-MY',{minimumFractionDigits:2})}`
+        : `${name}  · no entries`;
+      sel.appendChild(opt);
+    });
   });
+
   if (current) sel.value = current;
 }
 
@@ -4114,7 +4146,14 @@ function sortAndRenderGL() {
 
 function renderGLRows(rows) {
   const tbody  = document.getElementById('gl-tbody');
-  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text3)">No entries.</td></tr>'; return; }
+  if (!rows.length) {
+    const acctFilter = (document.getElementById('gl-filter-account')?.value||'');
+    const msg = acctFilter.startsWith('acct:')
+      ? `No entries for "${acctFilter.slice(5)}" in the current view.<br><span style="font-size:12px">If you expected entries, check the period filter, or verify the COA account's "maps from" tokens match your voucher categories / invoice job_types.</span>`
+      : 'No entries.';
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text3)">${msg}</td></tr>`;
+    return;
+  }
   const sort = document.getElementById('gl-sort')?.value || 'date-desc';
 
   const acctFilterRaw = (document.getElementById('gl-filter-account')?.value || '');
