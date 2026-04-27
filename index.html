@@ -1797,7 +1797,7 @@ async function openAccountDrill(code) {
   }
 
   // Sort by date asc and compute live total (no SNAP duplication)
-  txns.sort((a,b) => (a.date||'').localeCompare(b.date||''));
+  txns.sort((a,b) => new Date(a.date||0) - new Date(b.date||0));
   const liveTotal = txns.reduce((s, t) => s + parseFloat(t.amount||0), 0);
   const hasSnapshot = (acct.value !== undefined && acct.value !== null && acct.value !== '');
   const snapshotVal = hasSnapshot ? parseFloat(acct.value) : null;
@@ -2912,7 +2912,7 @@ function renderPayoutDetail() {
 
     // Voucher payment history rows
     const voucherRows = paidData.vouchers.length
-      ? paidData.vouchers.slice().sort((a,b)=>(a.date||'').localeCompare(b.date||'')).map(v => `
+      ? paidData.vouchers.slice().sort((a,b)=>new Date(a.date||0)-new Date(b.date||0)).map(v => `
           <tr>
             <td style="font-size:11px;color:var(--text2)">${formatDate(v.date)}</td>
             <td style="font-size:12px">${v.description||v.payee||'—'}</td>
@@ -3014,8 +3014,8 @@ function renderReceiptRows(rows) {
   // Sort per dropdown (default newest first)
   const _rcSort = document.getElementById('rc-sort')?.value || 'date-desc';
   rows = rows.slice().sort((a,b) => {
-    if (_rcSort === 'date-asc')     return (a.date||'').localeCompare(b.date||'');
-    if (_rcSort === 'date-desc')    return (b.date||'').localeCompare(a.date||'');
+    if (_rcSort === 'date-asc')     return new Date(a.date||0) - new Date(b.date||0);
+    if (_rcSort === 'date-desc')    return new Date(b.date||0) - new Date(a.date||0);
     if (_rcSort === 'amount-desc')  return parseFloat(b.amount||0) - parseFloat(a.amount||0);
     if (_rcSort === 'amount-asc')   return parseFloat(a.amount||0) - parseFloat(b.amount||0);
     if (_rcSort === 'client-asc')   return (a.client_name||'').localeCompare(b.client_name||'');
@@ -3227,8 +3227,8 @@ function renderVoucherRows(rows) {
   // Sort per dropdown
   const _pvSort = document.getElementById('pv-sort')?.value || 'date-desc';
   rows = rows.slice().sort((a,b) => {
-    if (_pvSort === 'date-asc')      return (a.date||'').localeCompare(b.date||'');
-    if (_pvSort === 'date-desc')     return (b.date||'').localeCompare(a.date||'');
+    if (_pvSort === 'date-asc')      return new Date(a.date||0) - new Date(b.date||0);
+    if (_pvSort === 'date-desc')     return new Date(b.date||0) - new Date(a.date||0);
     if (_pvSort === 'amount-desc')   return parseFloat(b.amount||0) - parseFloat(a.amount||0);
     if (_pvSort === 'amount-asc')    return parseFloat(a.amount||0) - parseFloat(b.amount||0);
     if (_pvSort === 'payee-asc')     return (a.payee||'').localeCompare(b.payee||'');
@@ -3535,7 +3535,6 @@ async function saveVoucher() {
 // Build GL rows client-side from cached INVOICES / RECEIPTS / VOUCHERS
 // No backend get_gl call needed — avoids timeout on unsupported action
 function buildGLFromCache() {
-  if ((GL_ALL_ROWS||[]).some(e => (e.source_type||'') === 'journal')) return [];
   const CAT_DR = {
     wages_ho:     'Wages — Ho / W / KC',
     wages_txy:    'Wages — TXY / Koay',
@@ -3675,7 +3674,7 @@ async function loadGL() {
   } catch(e) {}
 
   // Build GL from cache + merge manual journals
-let rows = (manualJournals && manualJournals.length > 0) ? [] : buildGLFromCache();
+  let rows = buildGLFromCache();
   manualJournals.forEach(j => {
     rows.push({
       date: j.date || '',
@@ -4141,8 +4140,8 @@ function populateGLAccountFilter() {
   // Collect distinct names + counts/sums from current GL_ALL_ROWS
   const acctMap = {};   // name -> {count, total}
   (GL_ALL_ROWS||[]).forEach(g => {
-    const dr = ((g.dr_code||'').trim() ? g.dr_code.trim()+' ' : '') + (g.dr_account||'').trim();
-    const cr = ((g.cr_code||'').trim() ? g.cr_code.trim()+' ' : '') + (g.cr_account||'').trim();
+    const dr = (g.dr_account||'').trim();
+    const cr = (g.cr_account||'').trim();
     const amt = parseFloat(g.amount||0);
     [dr, cr].forEach(n => {
       if (!n) return;
@@ -4193,18 +4192,15 @@ function populateGLAccountFilter() {
 }
 
 function sortAndRenderGL() {
-  if (GL_ALL_ROWS.some(e => (e.source_type||'') !== 'journal')) {
-    const j = GL_ALL_ROWS.filter(e => (e.source_type||'') === 'journal');
-    GL_ALL_ROWS.length = 0; j.forEach(e => GL_ALL_ROWS.push(e));
-  }
   const filter = document.getElementById('gl-filter-account')?.value || '';
   if (filter) { filterGLByAccount(); }
   else { renderGLRows(GL_ALL_ROWS); }
 }
+
 function renderGLRows(rows) {
-  const tbody = document.getElementById('gl-tbody');
+  const tbody  = document.getElementById('gl-tbody');
   if (!rows.length) {
-  const acctFilter = (document.getElementById('gl-filter-account')?.value||'');
+    const acctFilter = (document.getElementById('gl-filter-account')?.value||'');
     const msg = acctFilter.startsWith('acct:')
       ? `No entries for "${acctFilter.slice(5)}" in the current view.<br><span style="font-size:12px">If you expected entries, check the period filter, or verify the COA account's "maps from" tokens match your voucher categories / invoice job_types.</span>`
       : 'No entries.';
@@ -4261,7 +4257,7 @@ function renderGLRows(rows) {
     } catch(e) {}
   }
 
-  const sortedAsc = rows.slice().sort((a,b) => (a.date||'').localeCompare(b.date||''));
+  const sortedAsc = rows.slice().sort((a,b) => new Date(a.date||0) - new Date(b.date||0));
   let display = sortedAsc;
   let groupedByAccount = false;
   if (sort === 'date-desc')         display = sortedAsc.slice().reverse();
