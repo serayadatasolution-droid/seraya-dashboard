@@ -299,7 +299,7 @@
   <div class="sidebar">
     <div class="sidebar-logo">
       <div class="sidebar-logo-name">Seraya Data Solution</div>
-      <div class="sidebar-logo-reg">JM1027134-P · v26.04.26</div>
+      <div class="sidebar-logo-reg">JM1027134-P · v26.04.28</div>
     </div>
     <nav class="sidebar-nav">
       <div class="nav-section">Overview</div>
@@ -345,6 +345,10 @@
       </div>
       <div class="nav-item" onclick="showPage('retention')">
         <span class="icon">◑</span><span>Retention Recon</span>
+      </div>
+      <div class="nav-section">Reminders</div>
+      <div class="nav-item" onclick="showPage('reminders')">
+        <span class="icon">⏰</span><span>Client Deadlines</span>
       </div>
       <div class="nav-section">Configuration</div>
       <div class="nav-item" onclick="showPage('coa')">
@@ -860,6 +864,69 @@
             </tr>
           </thead>
           <tbody id="coa-recon-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══ CLIENT DEADLINES ══ -->
+    <div class="page" id="page-reminders">
+      <div class="page-header">
+        <div class="page-title">Client Deadlines</div>
+        <div class="page-sub" id="rem-today-label"></div>
+        <div class="page-actions">
+          <button class="btn btn-secondary" onclick="renderReminders()">↻ Refresh</button>
+        </div>
+      </div>
+
+      <!-- Stats bar -->
+      <div class="metrics" id="rem-stats"></div>
+
+      <!-- Legend -->
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px;font-size:12px;color:var(--text2)">
+        <span style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:var(--red);display:inline-block"></span>Overdue</span>
+        <span style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:#ea580c;display:inline-block"></span>Due ≤ 30 days</span>
+        <span style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:#d97706;display:inline-block"></span>Due 31–90 days</span>
+        <span style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:var(--green);display:inline-block"></span>Due > 90 days</span>
+      </div>
+
+      <!-- Filters -->
+      <div class="filters">
+        <select class="filter-select" id="rem-f-client" onchange="renderReminders()"><option value="">All clients</option></select>
+        <select class="filter-select" id="rem-f-task" onchange="renderReminders()"><option value="">All tasks</option></select>
+        <select class="filter-select" id="rem-f-type" onchange="renderReminders()">
+          <option value="">All types</option>
+          <option value="tax">Tax</option>
+          <option value="cosec">Cosec</option>
+          <option value="audit">Audit</option>
+          <option value="accounting">Bookkeeping</option>
+        </select>
+        <select class="filter-select" id="rem-f-status" onchange="renderReminders()">
+          <option value="">All</option>
+          <option value="overdue">Overdue</option>
+          <option value="pending">Pending</option>
+          <option value="done">Done</option>
+        </select>
+        <span id="rem-count-label" style="font-size:12px;color:var(--text2);align-self:center"></span>
+      </div>
+
+      <!-- Table -->
+      <div class="card">
+        <table>
+          <thead>
+            <tr>
+              <th onclick="remSetSort('urgency')" style="cursor:pointer;user-select:none">Status</th>
+              <th onclick="remSetSort('client')" style="cursor:pointer;user-select:none">Client ↕</th>
+              <th>YE</th>
+              <th onclick="remSetSort('task')" style="cursor:pointer;user-select:none">Task ↕</th>
+              <th onclick="remSetSort('deadline')" style="cursor:pointer;user-select:none">Deadline ↕</th>
+              <th onclick="remSetSort('days')" style="cursor:pointer;user-select:none">Days ↕</th>
+              <th>Type</th>
+              <th>Billed</th>
+              <th>Done</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="rem-tbody"></tbody>
         </table>
       </div>
     </div>
@@ -1383,6 +1450,7 @@ function showPage(id) {
   if (id === 'aging')             loadAging();
   if (id === 'retention')         loadRetention();
   if (id === 'coa')               loadCOA();
+  if (id === 'reminders')         renderReminders();
 }
 
 // ══════════════════════════════════════════════════
@@ -5359,8 +5427,7 @@ function syncFromExcelSnapshot() {
   Object.entries(COA_EXCEL_SNAPSHOT).forEach(([code, value]) => {
     const idx = coa.findIndex(a => a.code === code);
     if (idx < 0) { missing.push(code); return; }
-    coa[idx].value = value;  // hardcoded value wins over live mapsFrom
-    // mapsFrom is preserved — it still claims live categories for the unmapped catchall
+    coa[idx].value = value;
     updated++;
   });
   saveCOA(coa);
@@ -5369,6 +5436,226 @@ function syncFromExcelSnapshot() {
   toast(msg,'success');
   loadCOA();
 }
+
+// ══════════════════════════════════════════════════
+// CLIENT DEADLINE REMINDERS
+// ══════════════════════════════════════════════════
+(function() {
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  // Client list with year-end month (1=Jan…12=Dec), services, and cosec AR anniversary
+  const REM_CLIENTS = [
+    {id:'twodfire',  name:'Twodfire Sales & Marketing (M) Sdn Bhd', ye:12, tax:true, cosec:true,  ar:{m:2,d:28}},
+    {id:'hnb',       name:'H & B Wealth Empire Sdn Bhd',            ye:12, tax:true, cosec:true,  ar:{m:3,d:27}},
+    {id:'laohuo',    name:'Lao Huo Guo (PG) Sdn. Bhd.',             ye:9,  tax:true, cosec:true,  ar:{m:8,d:12}},
+    {id:'sixiteen',  name:'6ixteen Property Sdn Bhd',               ye:2,  tax:true, cosec:true,  ar:{m:10,d:28}},
+    {id:'tgg',       name:'TGG Steel Sdn Bhd',                      ye:6,  tax:true, cosec:false, ar:null},
+    {id:'bio3r',     name:'Bio 3R Greentech Sdn Bhd',               ye:9,  tax:true, cosec:false, ar:null},
+    {id:'dfire',     name:'2DFire Technology Distributor Sdn Bhd',  ye:12, tax:true, cosec:false, ar:null},
+    {id:'amatic',    name:'Amatic Auto Parts Sdn Bhd',              ye:12, tax:true, cosec:false, ar:null},
+    {id:'grandhill', name:'Grand Hill Mining Sdn Bhd',              ye:12, tax:true, cosec:false, ar:null},
+  ];
+
+  let remAllTasks = [];
+  let remTaskCounter = 0;
+  let remSortBy = 'urgency', remSortDir = 1;
+
+  function lastDay(year, m1) { return new Date(year, m1, 0); }
+  function recentFYE(ye) {
+    const now = new Date(), yr = now.getFullYear();
+    const d = lastDay(yr, ye);
+    return d <= now ? d : lastDay(yr - 1, ye);
+  }
+  function fyStart(ye) {
+    const fye = recentFYE(ye);
+    return new Date(fye.getFullYear(), fye.getMonth() + 1, 1);
+  }
+  function nAfterFYE(ye, n) {
+    const fye = recentFYE(ye);
+    return new Date(fye.getFullYear(), fye.getMonth() + n + 1, 0);
+  }
+  function cp204aDate(ye, n) {
+    const s = fyStart(ye);
+    return new Date(s.getFullYear(), s.getMonth() + n, 0);
+  }
+  function cp204Next(ye) {
+    const fye = recentFYE(ye);
+    const nxt = lastDay(fye.getFullYear() + 1, ye);
+    return new Date(nxt.getFullYear(), nxt.getMonth(), 0);
+  }
+  function cp204Current(ye) {
+    const fye = recentFYE(ye);
+    return new Date(fye.getFullYear(), fye.getMonth(), 0);
+  }
+  function daysFrom(d) {
+    return Math.round((d - new Date()) / 86400000);
+  }
+
+  function buildRemTasks() {
+    remAllTasks = [];
+    remTaskCounter = 0;
+    const mk = (c, task, type, deadline, note) => ({
+      id: ++remTaskCounter,
+      clientId: c.id, clientName: c.name,
+      ye: MONTHS[c.ye - 1], task, type, deadline, note,
+      billed: 'No', done: false, deleted: false,
+    });
+
+    REM_CLIENTS.forEach(c => {
+      const ye = c.ye;
+      // Form E (all clients) — both FY cycles
+      remAllTasks.push(mk(c, 'Form E', 'tax', new Date(2026,2,31), 'FY2025'));
+      remAllTasks.push(mk(c, 'Form E', 'tax', new Date(2027,2,31), 'FY2026'));
+      // Bookkeeping & Audit
+      remAllTasks.push(mk(c, 'Bookkeeping', 'accounting', nAfterFYE(ye, 4)));
+      remAllTasks.push(mk(c, 'Audit',       'audit',      nAfterFYE(ye, 6)));
+      // Tax tasks
+      if (c.tax) {
+        remAllTasks.push(mk(c, 'Form C',             'tax', nAfterFYE(ye, 8)));
+        remAllTasks.push(mk(c, 'CP204 (current FY)', 'tax', cp204Current(ye), 'Current FY estimate'));
+        remAllTasks.push(mk(c, 'CP204 (next FY)',    'tax', cp204Next(ye),    'Upcoming FY estimate'));
+        remAllTasks.push(mk(c, 'CP204a (6th month)', 'tax', cp204aDate(ye, 6)));
+        remAllTasks.push(mk(c, 'CP204a (9th month)', 'tax', cp204aDate(ye, 9)));
+        remAllTasks.push(mk(c, 'CP204a (11th month)','tax', cp204aDate(ye, 11)));
+      }
+      // Cosec tasks
+      if (c.cosec) {
+        remAllTasks.push(mk(c, 'MBRS Submission', 'cosec', nAfterFYE(ye, 7)));
+        if (c.ar) {
+          const now = new Date();
+          remAllTasks.push(mk(c, 'Annual Return & BO', 'cosec', new Date(now.getFullYear(), c.ar.m - 1, c.ar.d)));
+        }
+      }
+    });
+  }
+
+  function populateRemFilters() {
+    const fc = document.getElementById('rem-f-client');
+    if (!fc || fc.options.length > 1) return;
+    REM_CLIENTS.forEach(c => {
+      const o = document.createElement('option'); o.value = c.id; o.textContent = c.name; fc.appendChild(o);
+    });
+    const ft = document.getElementById('rem-f-task');
+    const names = [...new Set(remAllTasks.map(t => t.task))].sort();
+    names.forEach(n => { const o = document.createElement('option'); o.value = n; o.textContent = n; ft.appendChild(o); });
+  }
+
+  function remSetSort(col) {
+    if (remSortBy === col) remSortDir *= -1; else { remSortBy = col; remSortDir = 1; }
+    renderReminders();
+  }
+  window.remSetSort = remSetSort;
+
+  function typeBadgeRem(t) {
+    const map = { tax:'badge-amber', cosec:'badge-blue', audit:'badge-purple', accounting:'badge-green' };
+    const labels = { tax:'Tax', cosec:'Cosec', audit:'Audit', accounting:'BK' };
+    return `<span class="badge ${map[t]||'badge-gray'}">${labels[t]||t}</span>`;
+  }
+
+  window.remSetBilled = (id, val) => { const t = remAllTasks.find(x => x.id === id); if (t) t.billed = val; };
+  window.remSetDone   = (id, val) => { const t = remAllTasks.find(x => x.id === id); if (t) { t.done = val; renderReminders(); } };
+  window.remDelTask   = (id) => {
+    const t = remAllTasks.find(x => x.id === id);
+    if (t && confirm(`Remove "${t.task}" for ${t.clientName}?`)) { t.deleted = true; renderReminders(); }
+  };
+
+  window.renderReminders = function() {
+    if (!remAllTasks.length) buildRemTasks();
+    populateRemFilters();
+
+    // Today label
+    const todayEl = document.getElementById('rem-today-label');
+    if (todayEl) todayEl.textContent = 'Today: ' + new Date().toLocaleDateString('en-MY',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
+
+    const fc  = (document.getElementById('rem-f-client')  || {}).value || '';
+    const ft  = (document.getElementById('rem-f-task')    || {}).value || '';
+    const ftp = (document.getElementById('rem-f-type')    || {}).value || '';
+    const fst = (document.getElementById('rem-f-status')  || {}).value || '';
+
+    let rows = remAllTasks.filter(t => {
+      if (t.deleted) return false;
+      if (fc && t.clientId !== fc) return false;
+      if (ft && t.task !== ft) return false;
+      if (ftp && t.type !== ftp) return false;
+      const days = daysFrom(t.deadline);
+      if (fst === 'overdue' && (days >= 0 || t.done)) return false;
+      if (fst === 'pending' && (days < 0 || t.done)) return false;
+      if (fst === 'done' && !t.done) return false;
+      return true;
+    });
+
+    rows.sort((a, b) => {
+      let va, vb;
+      const urg = (x) => x.done ? 999999 : daysFrom(x.deadline);
+      if (remSortBy === 'urgency') { va = urg(a); vb = urg(b); }
+      else if (remSortBy === 'client') { va = a.clientName; vb = b.clientName; }
+      else if (remSortBy === 'task') { va = a.task; vb = b.task; }
+      else { va = a.deadline; vb = b.deadline; }
+      return (va < vb ? -1 : va > vb ? 1 : 0) * remSortDir;
+    });
+
+    // Stats
+    const all  = remAllTasks.filter(t => !t.deleted);
+    const over = all.filter(t => !t.done && daysFrom(t.deadline) < 0).length;
+    const soon = all.filter(t => !t.done && daysFrom(t.deadline) >= 0 && daysFrom(t.deadline) <= 30).length;
+    const mid  = all.filter(t => !t.done && daysFrom(t.deadline) > 30 && daysFrom(t.deadline) <= 90).length;
+    const done = all.filter(t => t.done).length;
+    const statsEl = document.getElementById('rem-stats');
+    if (statsEl) statsEl.innerHTML = `
+      <div class="metric-card"><div class="metric-label">Overdue</div><div class="metric-value red">${over}</div></div>
+      <div class="metric-card"><div class="metric-label">Due ≤ 30 days</div><div class="metric-value amber">${soon}</div></div>
+      <div class="metric-card"><div class="metric-label">Due ≤ 90 days</div><div class="metric-value" style="color:#d97706">${mid}</div></div>
+      <div class="metric-card"><div class="metric-label">Done</div><div class="metric-value green">${done}</div></div>
+    `;
+
+    const cntEl = document.getElementById('rem-count-label');
+    if (cntEl) cntEl.textContent = `Showing ${rows.length} tasks`;
+
+    const tbody = document.getElementById('rem-tbody');
+    if (!tbody) return;
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:32px;color:var(--text3)">No tasks match the current filters</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = rows.map(t => {
+      const days = daysFrom(t.deadline);
+      let badge, dayCls;
+      if (t.done) {
+        badge = '<span class="badge badge-green">Done</span>'; dayCls = '—';
+      } else if (days < 0) {
+        badge = `<span class="badge badge-red">Overdue ${-days}d</span>`; dayCls = `<span style="color:var(--red);font-weight:600">${days}</span>`;
+      } else if (days <= 30) {
+        badge = `<span class="badge badge-amber">Due ${days}d</span>`; dayCls = `<span style="color:#ea580c;font-weight:600">${days}</span>`;
+      } else if (days <= 90) {
+        badge = `<span class="badge" style="background:var(--amber-bg);color:var(--amber)">Due ${days}d</span>`; dayCls = `<span style="color:#d97706;font-weight:600">${days}</span>`;
+      } else {
+        badge = `<span class="badge badge-green">Due ${days}d</span>`; dayCls = `<span style="color:var(--green);font-weight:600">${days}</span>`;
+      }
+      const deadlineFmt = t.deadline.toLocaleDateString('en-MY',{day:'numeric',month:'short',year:'numeric'});
+      const noteHtml = t.note ? `<span style="font-size:11px;color:var(--text3);margin-left:4px">(${t.note})</span>` : '';
+      const rowStyle = t.done ? 'opacity:0.45' : '';
+      return `<tr style="${rowStyle}">
+        <td>${badge}</td>
+        <td style="font-size:13px;font-weight:500${t.done?';text-decoration:line-through':''}">${t.clientName}</td>
+        <td style="font-size:12px;color:var(--text3)">${t.ye}</td>
+        <td style="font-size:13px">${t.task}${noteHtml}</td>
+        <td style="font-size:12px;white-space:nowrap">${deadlineFmt}</td>
+        <td>${dayCls}</td>
+        <td>${typeBadgeRem(t.type)}</td>
+        <td>
+          <select class="filter-select" style="padding:3px 6px;font-size:11px" onchange="remSetBilled(${t.id},this.value)">
+            <option value="No" ${t.billed==='No'?'selected':''}>No</option>
+            <option value="Yes" ${t.billed==='Yes'?'selected':''}>Yes</option>
+            <option value="N/A" ${t.billed==='N/A'?'selected':''}>N/A</option>
+          </select>
+        </td>
+        <td style="text-align:center"><input type="checkbox" ${t.done?'checked':''} onchange="remSetDone(${t.id},this.checked)"></td>
+        <td><button class="btn btn-ghost btn-sm" onclick="remDelTask(${t.id})" style="color:var(--text3)" title="Remove">✕</button></td>
+      </tr>`;
+    }).join('');
+  };
+})();
 
 </script>
 </body>
