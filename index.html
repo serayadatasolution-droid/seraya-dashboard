@@ -1651,23 +1651,27 @@ function setClientMeta(client_id, meta) {
 }
 
 function computeAccountValue(acct, invoices, vouchers) {
-  // Priority: explicit hardcoded value (snapshot) ALWAYS wins over live mapsFrom.
-  // Account uses live mode only when value is undefined/null/'' AND mapsFrom is set.
-  // mapsFrom is also kept in snapshot mode so it claims categories for the unmapped catchall.
+  // Priority: live GL data ALWAYS wins for accounts with mapsFrom.
+  // Snapshots (hardcoded value) are only used for BS-only accounts with no GL mapping
+  // (e.g. bank balance, retained earnings). This way the IS/BS always reflects the
+  // actual Google Sheet data — no manual snapshot maintenance required.
+  if (acct.mapsFrom && acct.mapsFrom.length) {
+    const set = new Set(acct.mapsFrom.map(s => (s||'').toLowerCase()));
+    let sum = 0;
+    if (acct.section === 'revenue' || acct.section === 'other_income') {
+      if (set.has('disbursements_field')) sum += invoices.reduce((s,i) => s + parseFloat(i.disb_amount||0), 0);
+      sum += invoices.filter(i => set.has(getInvJobType(i).toLowerCase()))
+                     .reduce((s,i) => s + parseFloat(i.amount||0), 0);
+    } else {
+      sum += vouchers.filter(v => set.has((v.category||'').toLowerCase()))
+                     .reduce((s,v) => s + parseFloat(v.amount||0), 0);
+    }
+    return r2(sum);
+  }
+  // No GL mapping: fall back to hardcoded snapshot value (bank, retained earnings, etc.)
   const hasValue = acct.value !== undefined && acct.value !== null && acct.value !== '';
   if (hasValue) return parseFloat(acct.value);
-  if (!acct.mapsFrom || !acct.mapsFrom.length) return 0;
-  const set = new Set(acct.mapsFrom.map(s => (s||'').toLowerCase()));
-  let sum = 0;
-  if (acct.section === 'revenue' || acct.section === 'other_income') {
-    if (set.has('disbursements_field')) sum += invoices.reduce((s,i) => s + parseFloat(i.disb_amount||0), 0);
-    sum += invoices.filter(i => set.has(getInvJobType(i).toLowerCase()))
-                   .reduce((s,i) => s + parseFloat(i.amount||0), 0);
-  } else {
-    sum += vouchers.filter(v => set.has((v.category||'').toLowerCase()))
-                   .reduce((s,v) => s + parseFloat(v.amount||0), 0);
-  }
-  return r2(sum);
+  return 0;
 }
 
 // Backend invoice records don't have a job_type field — it lives on the allocation.
@@ -1892,11 +1896,15 @@ async function openAccountDrill(code) {
   document.getElementById('drill-summary').innerHTML =
     '<div style="display:flex;gap:24px;flex-wrap:wrap">' +
     '<div><span style="color:var(--text3)">Section:</span> <strong>' + sec.label + '</strong> <span style="color:var(--text3)">(' + (sec.statement||'') + ')</span></div>' +
-    (hasSnapshot
-      ? '<div><span style="color:var(--text3)">Snapshot value (drives IS/BS):</span> <strong style="color:var(--green)">RM ' + fmt(snapshotVal) + '</strong></div>'
-        + '<div><span style="color:var(--text3)">Live total from transactions:</span> <strong>RM ' + fmt(liveTotal) + '</strong></div>'
-        + (Math.abs(variance) > 0.01 ? '<div><span style="color:var(--amber)">Variance:</span> <strong style="color:var(--amber)">RM ' + fmt(variance) + '</strong></div>' : '')
-      : '<div><span style="color:var(--text3)">Total:</span> <strong>RM ' + fmt(liveTotal) + '</strong></div>') +
+    // For mapped accounts: IS/BS is driven by live data; snapshot is shown for reference only.
+    // For unmapped accounts: snapshot drives the BS value.
+    (acct.mapsFrom && acct.mapsFrom.length
+      ? '<div><span style="color:var(--text3)">Live total (drives IS/BS):</span> <strong style="color:var(--green)">RM ' + fmt(liveTotal) + '</strong></div>'
+        + (hasSnapshot ? '<div><span style="color:var(--text3)">Excel snapshot (reference only):</span> <strong style="color:var(--text3)">RM ' + fmt(snapshotVal) + '</strong></div>'
+          + (Math.abs(variance) > 0.01 ? '<div><span style="color:var(--amber)">Variance vs Excel:</span> <strong style="color:var(--amber)">RM ' + fmt(variance) + '</strong></div>' : '') : '')
+      : (hasSnapshot
+        ? '<div><span style="color:var(--text3)">Snapshot value (drives IS/BS):</span> <strong style="color:var(--green)">RM ' + fmt(snapshotVal) + '</strong></div>'
+        : '<div><span style="color:var(--text3)">Total:</span> <strong>RM ' + fmt(liveTotal) + '</strong></div>')) +
     '<div><span style="color:var(--text3)">Transactions:</span> <strong>' + txns.length + '</strong></div>' +
     (acct.mapsFrom && acct.mapsFrom.length ? '<div><span style="color:var(--text3)">Mapped from:</span> <code style="font-size:11px">' + acct.mapsFrom.join(', ') + '</code></div>' : '') +
     '</div>';
@@ -4551,9 +4559,10 @@ async function loadIncomeStatement() {
     const sec = COA_SECTIONS[a.section]||{};
     return sec.statement === 'PL' && sec.side === 'expense';
   });
-  const hasValue = a => a.value !== undefined && a.value !== null && a.value !== '';
-  const incomeSnapshotMode  = allIncomeAccts.length  > 0 && allIncomeAccts.every(hasValue);
-  const expenseSnapshotMode = allExpenseAccts.length > 0 && allExpenseAccts.every(hasValue);
+  // Snapshot mode disabled: IS always uses live GL data for mapped accounts.
+  // Unmapped items always surface so nothing is silently hidden.
+  const incomeSnapshotMode  = false;
+  const expenseSnapshotMode = false;
 
   if (!incomeSnapshotMode) {
     invoices.forEach(i => {
