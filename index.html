@@ -1701,9 +1701,12 @@ function augmentInvoicesWithJobType() {
 // because loadInvoices() replaces INVOICES with backend data that lacks job_type.
 let __jtCache = null;  // memoized inv_no → job_type map; reset on invoice/allocation load
 function _rebuildJtCache() {
-  __jtCache = {};
   // ALLOCATIONS is `let`-declared so it's not on window — must reference by bare name
   const allocs = (typeof ALLOCATIONS !== 'undefined' && Array.isArray(ALLOCATIONS)) ? ALLOCATIONS : [];
+  // Don't commit an empty cache — leave __jtCache null so the next call retries
+  // once ALLOCATIONS has actually loaded.
+  if (!allocs.length) return;
+  __jtCache = {};
   allocs.forEach(a => {
     const k = (a.inv_no||'').toString().trim();
     const v = (a.job_type||'').toString().trim();
@@ -4500,11 +4503,12 @@ async function loadIncomeStatement() {
   const vouchersAll = VOUCHERS.length ? VOUCHERS : (await api({action:'get_vouchers'})).data || [];
   // Ensure invoices have job_type populated from allocations
   if (!ALLOCATIONS || !ALLOCATIONS.length) { try { await loadAllocations(); } catch(e){} }
+  invalidateJtCache();          // force fresh rebuild from current ALLOCATIONS before unmapped scan
   augmentInvoicesWithJobType();
 
   const yearSel = document.getElementById('is-filter-year');
   if (yearSel.options.length <= 1) {
-    const years = [...new Set(invoicesAll.map(i=>(i.inv_date||i.date||'').slice(0,4)).filter(Boolean))].sort().reverse();
+    const years = [...new Set(invoicesAll.map(i=>{ const d=i.inv_date||i.date||''; if(/^\d{4}/.test(d)) return d.slice(0,4); const m=d.match(/\b(\d{4})\b/); return m?m[1]:''; }).filter(Boolean))].sort().reverse();
     years.forEach(y => { const o = document.createElement('option'); o.value=y; o.textContent=y; yearSel.appendChild(o); });
     // Default to current year so 2025 carry-forward doesn't pollute 2026 P/L
     const currentYear = String(new Date().getFullYear());
@@ -4516,7 +4520,9 @@ async function loadIncomeStatement() {
     return loadIncomeStatement();
   }
 
-  const filterYear = y => !year || (y||'').startsWith(year);
+  // Extract 4-digit year from either ISO ("2026-04-18") or JS Date string ("Sun Jan 04 2026 ...")
+  const extractYear = d => { if (!d) return ''; if (/^\d{4}/.test(d)) return d.slice(0,4); const m = (d||'').match(/\b(\d{4})\b/); return m ? m[1] : ''; };
+  const filterYear = y => !year || extractYear(y||'') === year;
   const invoices = invoicesAll.filter(i => i.status !== 'cancelled' && filterYear(i.inv_date||i.date||''));
   const vouchers = vouchersAll.filter(v => filterYear(v.date||'') && !isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__'));
 
