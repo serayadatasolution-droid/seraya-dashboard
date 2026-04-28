@@ -1493,12 +1493,12 @@ const COA_DEFAULT = [
   { code: '1500', name: 'Phone',                        section: 'non_current_asset', value: 5400.00 },
   { code: '1600', name: 'Software',                     section: 'non_current_asset', value: 1800.00 },
   // Current assets
-  { code: '1100', name: 'Trade debtor',                 section: 'current_asset',     value: 3073.50, source: 'live_outstanding_invoices' },
-  { code: '1010', name: 'Bank balance (CIMB)',          section: 'current_asset',     value: 3790.97 },
+  { code: '1100', name: 'Trade debtor',                 section: 'current_asset',     value: 3398.50, source: 'live_outstanding_invoices' },
+  { code: '1010', name: 'Bank balance (CIMB)',          section: 'current_asset',     value: 3890.97 },
   // Equity (per Excel: Capital + Drawings + Profit + Retained)
   { code: '3000', name: 'Capital',                      section: 'equity',            value: 12000.00 },
   { code: '3300', name: 'Drawings',                     section: 'equity',            value: 819.05 },
-  { code: '3200', name: 'Profit for the year',          section: 'equity',            value: 3914.15, source: 'pl_net_profit' },
+  { code: '3200', name: 'Profit for the year',          section: 'equity',            value: 4339.15, source: 'pl_net_profit' },
   { code: '3100', name: 'Retained profits',             section: 'equity',            value: 6331.27 },
   // Current liabilities
   { code: '2100', name: 'Other payable',                section: 'current_liability', value: 0 },
@@ -1557,6 +1557,18 @@ function getCOA() {
         healed = true;
       }
     });
+    // Deduplicate: if two entries share the same code, keep the one with mapsFrom (live-mapped)
+    // over a hardcoded snapshot-only entry. This fixes the duplicate 6300 SSM Charges issue.
+    const byCode = {};
+    coa.forEach(a => {
+      if (!byCode[a.code]) { byCode[a.code] = a; return; }
+      const existing = byCode[a.code];
+      const existingHasMaps = existing.mapsFrom && existing.mapsFrom.length;
+      const newHasMaps      = a.mapsFrom && a.mapsFrom.length;
+      if (!existingHasMaps && newHasMaps) byCode[a.code] = a; // prefer live-mapped
+    });
+    const deduped = Object.values(byCode);
+    if (deduped.length !== coa.length) { coa = deduped; healed = true; }
     if (healed) localStorage.setItem(COA_LS_KEY, JSON.stringify(coa));
     return coa;
   } catch (e) { return JSON.parse(JSON.stringify(COA_DEFAULT)); }
@@ -4588,8 +4600,10 @@ async function loadIncomeStatement() {
     const rows = accts.map(a => ({ a, v: computeAccountValue(a, invoices, vouchers) }))
       .sort((x,y) => (x.a.code||'').localeCompare(y.a.code||''));
     let html = `<div class="fin-section-title" style="margin-top:8px">${label}</div>`;
-    // Show ALL accounts in the section (even zero) so structure is always visible
+    // Hide zero-value accounts (hardcoded only; always show live-mapped even if zero)
     rows.forEach(({a,v}) => {
+      const isLive = a.mapsFrom && a.mapsFrom.length;
+      if (Math.abs(v) < 0.005 && !isLive) return; // skip hardcoded zeros
       const codeBadge = a.code ? `<span style="color:var(--text3);font-family:'DM Mono',monospace;font-size:11px;margin-right:6px">${a.code}</span>` : '';
       const valStr = isExpense ? `(${fmt(v)})` : fmt(v);
       const cls    = isExpense ? 'fin-amt fin-neg' : 'fin-amt';
@@ -4694,6 +4708,8 @@ async function loadBalanceSheet() {
   const valStr = n => `${n < 0 ? '(' : ''}${fmt(n)}${n < 0 ? ')' : ''}`;
   const renderRow = (a) => {
     const v    = valueOf(a);
+    const isLive = a.mapsFrom && a.mapsFrom.length;
+    if (Math.abs(v) < 0.005 && !isLive) return ''; // hide hardcoded zero accounts
     const code = a.code ? `<span style="color:var(--text3);font-family:'DM Mono',monospace;font-size:11px;margin-right:6px">${a.code}</span>` : '';
     const click = a.code ? `onclick="openAccountDrill('${(a.code||'').replace(/'/g,"\\'")}')" style="cursor:pointer" title="Click to see underlying transactions"` : '';
     return `<div class="fin-row indent fin-row-clickable" ${click}><span>${code}${a.name}</span><span class="fin-amt">${valStr(v)}</span></div>`;
@@ -5375,28 +5391,28 @@ const COA_EXCEL_SNAPSHOT = {
   '1500': 5400.00,    // Phone
   '1600': 1800.00,    // Software
   // Current assets
-  '1100': 3073.50,    // Trade debtor (year-end)
-  '1010': 3790.97,    // Bank balance (CIMB)
+  '1100': 3398.50,    // Trade debtor (Excel GL 25.4.26)
+  '1010': 3890.97,    // Bank balance (Excel GL 25.4.26)
   // Equity
   '3000': 12000.00,   // Capital
   '3300': 819.05,     // Drawings
-  '3200': 3914.15,    // Profit for the year
+  '3200': 4339.15,    // Profit for the year (Excel IS 25.4.26)
   '3100': 6331.27,    // Retained profits
   // Liabilities
   '2100': 0,          // Other payable
   // Revenue (2026 totals from Excel Income Statement)
   '4000': 0,          // Personal tax
-  '4010': 10500.00,   // MBRS
-  '4020': 800.00,     // Bookkeeping
+  '4010': 10825.00,   // MBRS (Excel IS 25.4.26)
+  '4020': 800.00,     // Bookkeeping — INV260412 6ixteen Property 18.04.26 (set job_type=Bookkeeping in sheet)
   '4030': 1500.00,    // FS (Audit Exemption)
-  '4040': 135.00,     // Disbursements
+  '4040': 135.00,     // Disbursements (Excel: INV260105 RM95 + INV260407 RM40; INV260108 reclassification not yet in Excel)
   '4050': 0,          // Audit
   '4060': 788.50,     // Tax
-  '4070': 4178.80,    // Cosec
+  '4070': 4178.80,    // Cosec (Excel IS 25.4.26; live 4128 differs by RM50.80 INV260108 reclassification)
   // Direct costs
   '5500': 0,          // Commission
   // Admin expenses (2026 totals from Excel Income Statement)
-  '5030': 2267.40,    // Soleprop wages
+  '5030': 2267.40,    // Soleprop wages (Excel IS 25.4.26; live 1871.77 differs by RM395.63 — hard-deleted PV)
   '5031': 3463.02,    // Subcon TXY 1
   '5032': 0,          // Subcon TXY 2
   '5033': 1650.04,    // Subcon Ivy
@@ -5410,7 +5426,7 @@ const COA_EXCEL_SNAPSHOT = {
   '5141': 32.40,      // Courier charges
   '6900': 0,          // General expenses
   '5400': 0,          // Bank charges
-  '6300': 500.80,     // SSM Charges
+  '6300': 400.80,     // SSM Charges (Excel IS 25.4.26: PV001.26 50.80 + AR fees 300 + LHG filing 50; PV1777130483271 RM150 not yet in Excel)
   '6100': 278.36,     // Entertainment
   '6010': 0,          // Incorporation expenses
   // Depreciation (current year)
@@ -5444,16 +5460,18 @@ function syncFromExcelSnapshot() {
   const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
   // Client list with year-end month (1=Jan…12=Dec), services, and cosec AR anniversary
+  // bk:true  = bookkeeping client (generates Bookkeeping deadline)
+  // audit:true = audit client (generates Audit deadline)
   const REM_CLIENTS = [
-    {id:'twodfire',  name:'Twodfire Sales & Marketing (M) Sdn Bhd', ye:12, tax:true, cosec:true,  ar:{m:2,d:28}},
-    {id:'hnb',       name:'H & B Wealth Empire Sdn Bhd',            ye:12, tax:true, cosec:true,  ar:{m:3,d:27}},
-    {id:'laohuo',    name:'Lao Huo Guo (PG) Sdn. Bhd.',             ye:9,  tax:true, cosec:true,  ar:{m:8,d:12}},
-    {id:'sixiteen',  name:'6ixteen Property Sdn Bhd',               ye:2,  tax:true, cosec:true,  ar:{m:10,d:28}},
-    {id:'tgg',       name:'TGG Steel Sdn Bhd',                      ye:6,  tax:true, cosec:false, ar:null},
-    {id:'bio3r',     name:'Bio 3R Greentech Sdn Bhd',               ye:9,  tax:true, cosec:false, ar:null},
-    {id:'dfire',     name:'2DFire Technology Distributor Sdn Bhd',  ye:12, tax:true, cosec:false, ar:null},
-    {id:'amatic',    name:'Amatic Auto Parts Sdn Bhd',              ye:12, tax:true, cosec:false, ar:null},
-    {id:'grandhill', name:'Grand Hill Mining Sdn Bhd',              ye:12, tax:true, cosec:false, ar:null},
+    {id:'twodfire',  name:'Twodfire Sales & Marketing (M) Sdn Bhd', ye:12, tax:true, cosec:true,  bk:false, audit:false, ar:{m:2,d:28}},
+    {id:'hnb',       name:'H & B Wealth Empire Sdn Bhd',            ye:12, tax:true, cosec:true,  bk:false, audit:false, ar:{m:3,d:27}},
+    {id:'laohuo',    name:'Lao Huo Guo (PG) Sdn. Bhd.',             ye:9,  tax:true, cosec:true,  bk:false, audit:false, ar:{m:8,d:12}},
+    {id:'sixiteen',  name:'6ixteen Property Sdn Bhd',               ye:2,  tax:true, cosec:true,  bk:false, audit:false, ar:{m:10,d:28}},
+    {id:'tgg',       name:'TGG Steel Sdn Bhd',                      ye:6,  tax:true, cosec:false, bk:false, audit:false, ar:null},
+    {id:'bio3r',     name:'Bio 3R Greentech Sdn Bhd',               ye:9,  tax:true, cosec:false, bk:false, audit:false, ar:null},
+    {id:'dfire',     name:'2DFire Technology Distributor Sdn Bhd',  ye:12, tax:true, cosec:false, bk:false, audit:false, ar:null},
+    {id:'amatic',    name:'Amatic Auto Parts Sdn Bhd',              ye:12, tax:true, cosec:false, bk:false, audit:false, ar:null},
+    {id:'grandhill', name:'Grand Hill Mining Sdn Bhd',              ye:12, tax:true, cosec:false, bk:false, audit:false, ar:null},
   ];
 
   let remAllTasks = [];
@@ -5506,9 +5524,10 @@ function syncFromExcelSnapshot() {
       // Form E (all clients) — both FY cycles
       remAllTasks.push(mk(c, 'Form E', 'tax', new Date(2026,2,31), 'FY2025'));
       remAllTasks.push(mk(c, 'Form E', 'tax', new Date(2027,2,31), 'FY2026'));
-      // Bookkeeping & Audit
-      remAllTasks.push(mk(c, 'Bookkeeping', 'accounting', nAfterFYE(ye, 4)));
-      remAllTasks.push(mk(c, 'Audit',       'audit',      nAfterFYE(ye, 6)));
+      // Bookkeeping — only for clients with bk:true
+      if (c.bk)    remAllTasks.push(mk(c, 'Bookkeeping', 'accounting', nAfterFYE(ye, 4)));
+      // Audit — only for clients with audit:true
+      if (c.audit) remAllTasks.push(mk(c, 'Audit', 'audit', nAfterFYE(ye, 6)));
       // Tax tasks
       if (c.tax) {
         remAllTasks.push(mk(c, 'Form C',             'tax', nAfterFYE(ye, 8)));
