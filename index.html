@@ -1818,15 +1818,17 @@ async function openAccountDrill(code) {
   }
 
   // Bank: receipts in (+), vouchers out (−)
+  // bank_account field in sheet = 'Drawings' or 'CIMB 8606183963'; payment_account is local-only
+  const isDrawings = x => (x.bank_account||x.payment_account||'').toLowerCase().includes('draw');
   if (/bank|cimb|cash at bank/i.test(acct.name) || code === '1010') {
-    receipts.filter(r => r.payment_account !== 'drawings').forEach(r => {
+    receipts.filter(r => !isDrawings(r)).forEach(r => {
       txns.push({
         date: r.date, ref: r.receipt_id || r.id, type: 'RC',
         description: 'Receipt — ' + (r.client_name||r.inv_no||''),
         amount: parseFloat(r.amount||0)
       });
     });
-    vouchers.filter(v => v.payment_account !== 'drawings').forEach(v => {
+    vouchers.filter(v => !isDrawings(v)).forEach(v => {
       txns.push({
         date: v.date, ref: v.voucher_id || v.id, type: 'PV',
         description: (v.payee||'') + ' — ' + (v.description||v.category||''),
@@ -1858,14 +1860,14 @@ async function openAccountDrill(code) {
 
   // Drawings: vouchers paid from drawings (+), receipts to drawings (−)
   if (/drawing/i.test(acct.name) || code === '3300') {
-    vouchers.filter(v => v.payment_account === 'drawings').forEach(v => {
+    vouchers.filter(v => isDrawings(v)).forEach(v => {
       txns.push({
         date: v.date, ref: v.voucher_id || v.id, type: 'PV',
         description: (v.payee||'') + ' — ' + (v.description||v.category||''),
         amount: parseFloat(v.amount||0)
       });
     });
-    receipts.filter(r => r.payment_account === 'drawings').forEach(r => {
+    receipts.filter(r => isDrawings(r)).forEach(r => {
       txns.push({
         date: r.date, ref: r.receipt_id || r.id, type: 'RC',
         description: 'Drawing repayment — ' + (r.client_name||r.inv_no||''),
@@ -1973,8 +1975,9 @@ async function loadDashboard() {
 
   // ── Recalculate bank balance client-side (server doesn't know about local deletes) ──
   const OB_BANK   = 761.96;
-  const bankRc    = receipts.filter(r => r.payment_account !== 'drawings').reduce((s,r) => s + parseFloat(r.amount||0), 0);
-  const bankPv    = vouchers.filter(v => v.payment_account !== 'drawings').reduce((s,v) => s + parseFloat(v.amount||0), 0);
+  const _isDraw   = x => (x.bank_account||x.payment_account||'').toLowerCase().includes('draw');
+  const bankRc    = receipts.filter(r => !_isDraw(r)).reduce((s,r) => s + parseFloat(r.amount||0), 0);
+  const bankPv    = vouchers.filter(v => !_isDraw(v)).reduce((s,v) => s + parseFloat(v.amount||0), 0);
   const bankBal   = r2(OB_BANK + bankRc - bankPv);
 
   document.getElementById('dm-billed').textContent     = fmt(d.total_billed);
@@ -4615,10 +4618,10 @@ async function loadIncomeStatement() {
     const rows = accts.map(a => ({ a, v: computeAccountValue(a, invoices, vouchers) }))
       .sort((x,y) => (x.a.code||'').localeCompare(y.a.code||''));
     let html = `<div class="fin-section-title" style="margin-top:8px">${label}</div>`;
-    // Hide zero-value accounts (hardcoded only; always show live-mapped even if zero)
+    // Hide zero-value accounts (all accounts — live or snapshot)
     rows.forEach(({a,v}) => {
       const isLive = a.mapsFrom && a.mapsFrom.length;
-      if (Math.abs(v) < 0.005 && !isLive) return; // skip hardcoded zeros
+      if (Math.abs(v) < 0.005) return; // skip any zero-value account
       const codeBadge = a.code ? `<span style="color:var(--text3);font-family:'DM Mono',monospace;font-size:11px;margin-right:6px">${a.code}</span>` : '';
       const valStr = isExpense ? `(${fmt(v)})` : fmt(v);
       const cls    = isExpense ? 'fin-amt fin-neg' : 'fin-amt';
@@ -4670,7 +4673,9 @@ async function loadBalanceSheet() {
 
   // Filter to current FY (matches Excel BS at 31.12.YYYY) — drawings/profit/etc. are "for the year"
   const fyYear = String(new Date().getFullYear());
-  const inFY  = d => (d||'').startsWith(fyYear);
+  // extractFYYear handles both ISO '2026-04-18' and JS Date strings 'Sun Jan 04 2026 ...'
+  const extractFYYear = d => { if (!d) return ''; if (/^\d{4}/.test(d)) return d.slice(0,4); const m = (d||'').match(/\b(\d{4})\b/); return m ? m[1] : ''; };
+  const inFY  = d => extractFYYear(d||'') === fyYear;
   const invoices = (INVOICES.length ? INVOICES : []).filter(i => i.status !== 'cancelled' && inFY(i.inv_date||i.date||''));
   const vouchers = (VOUCHERS.length ? VOUCHERS : []).filter(v => inFY(v.date||'') && !isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__'));
 
