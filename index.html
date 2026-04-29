@@ -970,7 +970,7 @@
         </div>
         <div class="form-field">
           <label>Client (end client)</label>
-          <input type="text" id="inv-client-name" placeholder="e.g. TGG Steel Sdn. Bhd." oninput="clientAutocomplete()" />
+          <input type="text" id="inv-client-name" placeholder="Click or type to search clients…" oninput="clientAutocomplete()" onfocus="clientAutocomplete(true)" onblur="setTimeout(()=>document.getElementById('client-suggestions').innerHTML='',200)" autocomplete="off" />
           <div id="client-suggestions" style="position:relative"></div>
         </div>
         <div class="form-field form-full">
@@ -2691,6 +2691,10 @@ function applyDescPreset(sel) {
   const row = sel.closest('.inv-line-row');
   if (row) {
     row.querySelector('.inv-line-desc').value = val;
+    // Auto-tick Disb checkbox when Disbursements preset is chosen
+    if (val === 'Disbursements') {
+      row.querySelector('.inv-line-isDisb').checked = true;
+    }
     sel.value = '';
     recalcInvLines();
   }
@@ -4098,14 +4102,15 @@ function populateInvoiceDropdowns() {
 }
 
 // Client autocomplete
-function clientAutocomplete() {
+function clientAutocomplete(showAll) {
   const q = document.getElementById('inv-client-name').value.toLowerCase();
   const box = document.getElementById('client-suggestions');
-  if (q.length < 2) { box.innerHTML = ''; return; }
-  const matches = CLIENTS.filter(c => c.name.toLowerCase().includes(q)).slice(0, 5);
+  const matches = showAll
+    ? CLIENTS.slice().sort((a,b) => a.name.localeCompare(b.name)).slice(0, 20)
+    : (q.length < 1 ? [] : CLIENTS.filter(c => c.name.toLowerCase().includes(q)).slice(0, 10));
   if (!matches.length) { box.innerHTML = ''; return; }
-  box.innerHTML = `<div style="position:absolute;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);z-index:100;width:100%;box-shadow:var(--shadow-md)">` +
-    matches.map(c => `<div style="padding:8px 12px;cursor:pointer;font-size:13px" onmousedown="selectClient('${c.client_id}')">${c.name}<span style="font-size:11px;color:var(--text3);margin-left:8px">${c.billing_party||''}</span></div>`).join('') +
+  box.innerHTML = `<div style="position:absolute;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);z-index:100;width:100%;box-shadow:var(--shadow-md);max-height:240px;overflow-y:auto">` +
+    matches.map(c => `<div style="padding:8px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border)" onmousedown="selectClient('${c.client_id}')">${c.name}<span style="font-size:11px;color:var(--text3);margin-left:8px">${c.billing_party||''}</span></div>`).join('') +
     '</div>';
 }
 
