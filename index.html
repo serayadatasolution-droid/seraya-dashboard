@@ -1849,7 +1849,7 @@ async function openAccountDrill(code) {
         });
       }
     });
-    receipts.forEach(r => {
+    receipts.filter(r => !isDrawings(r)).forEach(r => {
       txns.push({
         date: r.date, ref: r.receipt_id || r.id, type: 'RC',
         description: 'Receipt — ' + (r.client_name||r.inv_no||''),
@@ -4679,8 +4679,14 @@ async function loadBalanceSheet() {
   const invoices = (INVOICES.length ? INVOICES : []).filter(i => i.status !== 'cancelled' && inFY(i.inv_date||i.date||''));
   const vouchers = (VOUCHERS.length ? VOUCHERS : []).filter(v => inFY(v.date||'') && !isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__'));
 
-  // For Trade Debtor live calc we want ALL outstanding (regardless of year), so use unfiltered list
+  // For Trade Debtor and bank live calcs we want ALL transactions (regardless of year)
   const allInvoices = (INVOICES.length ? INVOICES : []).filter(i => i.status !== 'cancelled');
+
+  // Ensure receipts are available for live BS computations (bank, drawings, debtor)
+  if (!RECEIPTS || !RECEIPTS.length) { try { await prefetchGlobals(); } catch(e){} }
+  const _bsDraw  = x => (x.bank_account||x.payment_account||'').toLowerCase().includes('draw');
+  const _bsAllVch = (VOUCHERS||[]).filter(v => !isDeleted('vouchers',(v.voucher_id||v.id||'').toString()) && !(v.description||'').startsWith('__VOID__'));
+  const _bsAllRc  = (RECEIPTS||[]);
 
   const coa = getCOA();
 
@@ -4700,13 +4706,35 @@ async function loadBalanceSheet() {
     .reduce((s,i) => s + parseFloat(i.amount_outstanding || i.amount || 0), 0));
 
   const valueOf = (a) => {
-    // Priority: live mapsFrom > hardcoded value > derived source.
-    // This means a hardcoded Excel snapshot ALWAYS wins over auto-computed source unless mapsFrom is set.
+    // Priority: mapsFrom (live GL) > special live sources > snapshot fallback
     if (a.mapsFrom && a.mapsFrom.length) return computeAccountValue(a, invoices, vouchers);
+    // Source-based live computations — checked BEFORE snapshot so they stay current
+    if (a.source === 'pl_net_profit')             return plNetProfit;
+    if (a.source === 'live_outstanding_invoices') return liveDebtors;
+    // Bank (1010): OB + client receipts − bank payments  ← same formula as Dashboard & drill-down
+    if (a.code === '1010') {
+      const ob = (COA_OPENING_BALANCES['1010']||{}).amount || 0;
+      return r2(ob
+        + _bsAllRc.filter(r => !_bsDraw(r)).reduce((s,r) => s + parseFloat(r.amount||0), 0)
+        - _bsAllVch.filter(v => !_bsDraw(v)).reduce((s,v) => s + parseFloat(v.amount||0), 0));
+    }
+    // Drawings (3300): OB + drawings-funded vouchers − repayments  ← same as drill-down
+    if (a.code === '3300') {
+      const ob = (COA_OPENING_BALANCES['3300']||{}).amount || 0;
+      return r2(ob
+        + _bsAllVch.filter(v => _bsDraw(v)).reduce((s,v) => s + parseFloat(v.amount||0), 0)
+        - _bsAllRc.filter(r => _bsDraw(r)).reduce((s,r) => s + parseFloat(r.amount||0), 0));
+    }
+    // Trade Debtor (1100): OB + all invoice gross − client receipts  ← same as drill-down
+    if (a.code === '1100') {
+      const ob = (COA_OPENING_BALANCES['1100']||{}).amount || 0;
+      const invGross = allInvoices.reduce((s,i) => s + parseFloat(i.amount||0) + parseFloat(i.disb_amount||0), 0);
+      const rcNet    = _bsAllRc.filter(r => !_bsDraw(r)).reduce((s,r) => s + parseFloat(r.amount||0), 0);
+      return r2(ob + invGross - rcNet);
+    }
+    // Fallback: hardcoded snapshot (fixed assets, capital, retained profits, etc.)
     const hasValue = a.value !== undefined && a.value !== null && a.value !== '';
     if (hasValue) return parseFloat(a.value);
-    if (a.source === 'pl_net_profit')              return plNetProfit;
-    if (a.source === 'live_outstanding_invoices')  return liveDebtors;
     return 0;
   };
 
