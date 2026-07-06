@@ -13829,15 +13829,13 @@ function pvAutoDesc() {
   const prefix = catLabel ? `${catLabel} re: ` : 'Payment re: ';
   if (!items.length) {
     desc = '';
-  } else if (items.length <= 3) {
-    desc = prefix + items.join(', ');
   } else {
-    desc = prefix + items.slice(0, 2).join(', ') + ` +${items.length - 2} more`;
+    desc = prefix + items.join(', ');
   }
   // Append custom item descriptions if any
   const customDescs = pvGetCustomItems().map(i => i.desc).filter(Boolean);
   if (customDescs.length) desc += (desc ? ' + ' : prefix) + customDescs.join(', ');
-  descEl.value = desc.slice(0, 100);
+  descEl.value = desc;
 }
 
 // ── Custom (non-invoice) items in Payment Voucher ──
