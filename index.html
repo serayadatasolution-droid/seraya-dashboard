@@ -808,7 +808,7 @@
             <div class="form-field"><label>FY / Period</label><input type="text" id="nj-period" placeholder="e.g. FY Dec 2025" /></div>
             <div class="form-field"><label>Due Date</label><input type="date" id="nj-due" /></div>
             <div class="form-field"><label>Preparer <span style="color:var(--text3);font-weight:400">(optional)</span></label>
-              <select id="nj-prep"><option value="">—</option><option value="ET">ET</option><option value="Koay">Koay</option><option value="Koay PH">Koay PH</option><option value="Ivy">Ivy</option></select></div>
+              <select id="nj-prep"><option value="">—</option><option value="ET">ET</option><option value="Koay">Koay</option><option value="Koay PH">Koay PH</option><option value="Ivy">Ivy</option><option value="KC">KC</option></select></div>
             <div class="form-field"><label>Reviewer <span style="color:var(--text3);font-weight:400">(optional)</span></label>
               <select id="nj-rev"><option value="">—</option><option value="KC">KC</option><option value="Koay">Koay</option><option value="TKC">TKC</option></select></div>
             <div class="form-field form-full"><label>Description</label><input type="text" id="nj-desc" placeholder="e.g. Audit/FS — FY Dec 2025" /></div>
@@ -1657,6 +1657,7 @@
             <option value="Koay">Koay (Ms Koay)</option>
             <option value="Koay PH">Koay PH (public holiday rate)</option>
             <option value="Ivy">Ivy</option>
+            <option value="KC">KC (Ho)</option>
           </select>
         </div>
         <div class="form-field" id="alloc-reviewer-wrap">
@@ -4047,8 +4048,15 @@ function _bucketForLine(l, inv) {
       if (_lsP > 0 && _lsP < 100) _resolvedPrepPct = _lsP / 100;
     } catch(e) {}
   }
-  // (3) derive from saved amounts (no GAS changes needed; uses already-stored preparer_amt)
-  if (_resolvedPrepPct === null && _savedAlloc) {
+  // (3) derive from saved amounts (no GAS changes needed; uses already-stored preparer_amt).
+  // SAFETY: only trust this derived ratio when the saved allocation's preparer/reviewer
+  // names actually match THIS line's people. On multi-line invoices where different lines
+  // have different prepOvr/revOvr (e.g. one line prepared by KC, another by ET), the saved
+  // preparer_amt/reviewer_amt is an invoice-wide aggregate that does NOT correspond to this
+  // line's split — applying it here silently perpetuated stale/wrong splits indefinitely.
+  if (_resolvedPrepPct === null && _savedAlloc &&
+      _norm(_savedAlloc.preparer_name || '') === linePrep &&
+      _norm(_savedAlloc.reviewer_name  || '') === lineRev) {
     const _sP = parseFloat(_savedAlloc.preparer_amt || 0);
     const _sR = parseFloat(_savedAlloc.reviewer_amt  || 0);
     if (_sP + _sR > 0.01) _resolvedPrepPct = _sP / (_sP + _sR);
@@ -11219,7 +11227,7 @@ function _jobRowHTML(j, today){
   };
   const extC = (cls === 'fs' || cls === 'tax') ? extCell() : dash;
   // Assigned (preparer / reviewer) — both optional, stacked
-  const PREP_OPTS = ['','ET','Koay','Koay PH','Ivy'];
+  const PREP_OPTS = ['','ET','Koay','Koay PH','Ivy','KC'];
   const REV_OPTS  = ['','KC','Koay','TKC'];
   const miniSel = (field, opts, ph) => { const v = so&&so[field]?so[field]:''; return `<select onclick="${stop}" onchange="${stop};jobUpdateTracking('${j.key}','${field}',this.value)" style="${inB};max-width:88px">` + opts.map(o => `<option value="${o}"${v===o?' selected':''}>${o||ph}</option>`).join('') + `</select>`; };
   const assignedC = `<td style="padding:4px 6px"><div style="display:flex;flex-direction:column;gap:3px">${miniSel('preparer',PREP_OPTS,'Prep')}${miniSel('reviewer',REV_OPTS,'Rev')}</div></td>`;
