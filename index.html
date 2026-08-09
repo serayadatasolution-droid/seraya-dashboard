@@ -989,6 +989,7 @@
           <button class="btn btn-ghost" onclick="openAllocationAudit()" title="Verify every outstanding invoice has proper allocations flowing to Invoice Breakdown — count, gross_fee, KC presence, disb lines.">🔍 Audit Allocations</button>
           <button class="btn btn-ghost" onclick="openCeciliaRetainer()" title="Matrix view of cosec clients × quarters × Cecilia's retainer fee. Auto-detects from her voucher payments.">📅 Cecilia Retainer</button>
           <button class="btn btn-secondary" onclick="reconcileAgainstExcelGreen()" title="Mark every historical allocation as paid-out, EXCEPT the specific invoices that are still outstanding per your Excel green-highlighted rows. One-click bulk reconciliation.">↻ Reconcile from Excel</button>
+          <button class="btn btn-ghost" onclick="openExcelVoucherSyncModal()" title="Paste the 'Payment - Person - Client, Client...' voucher description lines from your Excel Due (to) tab. Flags any invoice that Excel says is already paid but this dashboard still shows as unpaid.">📋 Paste Excel Vouchers</button>
         </div>
       </div>
       <div class="filters">
@@ -6171,6 +6172,14 @@ function runAccountingHealth(receipts, vouchers) {
       }
     } catch(e) { console.warn('sched-backlog check failed', e); }
 
+    // ── Excel Voucher Sync check ──
+    let _excelSyncOk = true, _excelSyncDetail = '';
+    try {
+      const _es = (typeof checkExcelVoucherSync === 'function') ? checkExcelVoucherSync() : { ok: true, detail: '' };
+      _excelSyncOk = _es.ok;
+      _excelSyncDetail = _es.detail;
+    } catch(e) { console.warn('excel-voucher-sync check failed', e); }
+
     // Aggregate all checks (3 top-level + per-line)
     const _topChecks = [
       { name: 'Balance Sheet', ok: bsOk, detail: bsDetail },
@@ -6191,6 +6200,7 @@ function runAccountingHealth(receipts, vouchers) {
       { name: 'Schedule Backlog', ok: _schedOk, detail: _schedDetail },
       { name: 'BS Profit Consistency', ok: _bs3200Ok, detail: _bs3200Detail },
       { name: 'Payout Tally vs Invoice Breakdown', ok: _payoutConsistencyOk, detail: _payoutConsistencyDetail },
+      { name: 'Excel Voucher Sync', ok: _excelSyncOk, detail: _excelSyncDetail },
     ];
     const _allChecks = [..._topChecks.map(c => ({ ok: c.ok, label: c.name, detail: c.detail, type: 'top' })),
                         ..._isbsChecks.map(c => ({ ok: c.ok, label: c.label, detail: c.note || '', type: 'line' }))];
@@ -13043,8 +13053,12 @@ function renderPayoutDetail() {
     // much "untraced" owed remains, and pay it off in a future round.
     // Compute obligationOnOutstanding HERE (before residual uses it)
     const obligationOnOutstanding = awaitTotal + settledOnOutstanding + awaitDisbOutstanding + settledDisbOnOutstanding;
-    // Residual = Excel target − obligation on outstanding invoices.
-    const _traceable = obligationOnOutstanding;
+    // Residual = Excel target − ALL wages/disb not yet paid out to this person
+    // (totalOwing + totalDisbOwing), NOT just the subset tied to invoices the
+    // client hasn't paid yet. Using obligationOnOutstanding here double-counted
+    // the "Ready to Pay" bucket as untraced (it's already shown separately,
+    // above, in the Ready to Pay section) — fixed 2026-08-09.
+    const _traceable = totalOwing + totalDisbOwing;
     const residual = (target !== undefined && target > _traceable + 0.01) ? r2(target - _traceable) : 0;
     // Headline number = wages on OUTSTANDING invoices (matches BD's Yet-to-Pay column
     // exactly, which is what Excel's "Due to" reflects). This includes both
@@ -17492,6 +17506,130 @@ function _doReconcileExcel() {
   document.getElementById('_recon_excel_modal').remove();
   toast(`✓ Marked ${count} entries as settled (up to ${cutoff}). Outstanding invoices and post-cutoff items untouched.`, 'success');
   renderPayoutView();
+}
+
+// ── Excel Voucher Sync Check ────────────────────────────────────────────────
+// Boss sometimes pays a wage and records the voucher directly in the Excel
+// "Due (to)" tab (not through this app's own Payment Vouchers page). If that
+// Excel voucher never gets mirrored into wage_paid tracking here, Payout
+// Summary keeps showing money as "still owed" that has actually already been
+// paid — this is exactly what happened with INV260607/INV260608 (PV030.26,
+// 1 Jul 2026), found during the Aug 2026 ET reconciliation. This lets Boss
+// paste the raw "Payment - <Person> - <Client, Client, ...>" description
+// lines straight out of Excel and flags anything that looks already paid
+// there but is still sitting unpaid here. Added 2026-08-09.
+function getExcelVoucherText() {
+  try { return localStorage.getItem('seraya_excel_vouchers_v1') || ''; } catch(e) { return ''; }
+}
+function setExcelVoucherText(t) {
+  try { localStorage.setItem('seraya_excel_vouchers_v1', t || ''); } catch(e) {}
+}
+
+const EXCEL_VOUCHER_PERSON_ALIASES = {
+  'et': 'ET', 'koay': 'Koay', 'ivy': 'Ivy', 'kc': 'KC', 'cecilia': 'Cecilia',
+  'txy': 'Koay', 'ho': 'KC', 'w': 'KC', 'wan': 'KC',
+};
+
+// Parses free-text voucher description lines. Each line just needs to
+// contain "payment" + a recognizable person alias somewhere in it; everything
+// after the LAST " - " is treated as a comma-separated list of client-name
+// fragments (matches how Boss actually writes these in Excel, e.g.
+// "Payment- ET - Grand Hill Mining, Delanis, Toong, Backpackers, NS Syahadah").
+function _parseExcelVoucherLines(text) {
+  const lines = (text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const out = [];
+  lines.forEach(line => {
+    const low = line.toLowerCase();
+    if (!low.includes('payment')) return;
+    let person = null;
+    for (const alias of Object.keys(EXCEL_VOUCHER_PERSON_ALIASES)) {
+      const re = new RegExp('(^|[^a-z])' + alias + '([^a-z]|$)', 'i');
+      if (re.test(low)) { person = EXCEL_VOUCHER_PERSON_ALIASES[alias]; break; }
+    }
+    if (!person) return;
+    const parts = line.split(' - ');
+    const tail = parts.length > 1 ? parts[parts.length - 1] : '';
+    const fragments = tail.split(',').map(s => s.trim()).filter(s => s && s.length >= 4 && !/^\d/.test(s));
+    if (fragments.length) out.push({ raw: line, person, fragments });
+  });
+  return out;
+}
+
+function checkExcelVoucherSync() {
+  const text = getExcelVoucherText();
+  if (!text.trim()) return { ok: true, detail: '' };
+  let parsed;
+  try { parsed = _parseExcelVoucherLines(text); } catch(e) { return { ok: true, detail: '' }; }
+  const wpMap = (typeof getWagePaidMap === 'function') ? getWagePaidMap() : {};
+  const isPaid = (allocId, person) => {
+    if (!allocId) return false;
+    const ck = allocId + '|' + person;
+    return (wpMap[ck] !== undefined && wpMap[ck] !== null) || (wpMap[allocId] !== undefined && wpMap[allocId] !== null);
+  };
+  const findings = [];
+  const invoices = INVOICES || [];
+  const allocations = ALLOCATIONS || [];
+  parsed.forEach(({ raw, person, fragments }) => {
+    fragments.forEach(frag => {
+      const fl = frag.toLowerCase();
+      const matched = invoices.filter(inv => {
+        const cn = (inv.client_name || '').toLowerCase();
+        return cn && (cn.includes(fl) || fl.includes(cn.split(' ')[0]));
+      });
+      matched.forEach(inv => {
+        const rows = allocations.filter(a => a.inv_no === inv.inv_no && (typeof isVoided !== 'function' || !isVoided('allocations', a.alloc_id)));
+        rows.forEach(a => {
+          const involvesPerson = a.preparer_name === person || a.reviewer_name === person
+            || (person === 'KC' && parseFloat(a.kc_commission||0) > 0)
+            || (person === 'Koay' && parseFloat(a.koay_commission||0) > 0);
+          if (involvesPerson && !isPaid(a.alloc_id, person)) {
+            findings.push(`${inv.inv_no} (${(inv.client_name||'').trim()}) → ${person}, per "${raw.slice(0,70)}"`);
+          }
+        });
+      });
+    });
+  });
+  const uniq = [...new Set(findings)];
+  return {
+    ok: uniq.length === 0,
+    detail: uniq.length
+      ? `${uniq.length} invoice-person pair(s) look already paid per your pasted Excel vouchers but are still unpaid here: ${uniq.slice(0,3).join(' · ')}${uniq.length>3?` + ${uniq.length-3} more`:''}. Open Payout Summary, find the row, click "✓ paid".`
+      : ''
+  };
+}
+
+function openExcelVoucherSyncModal() {
+  const existing = document.getElementById('_excel_voucher_modal');
+  if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = '_excel_voucher_modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+  modal.innerHTML = `
+    <div style="background:var(--surface2);border-radius:12px;padding:24px;max-width:560px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.3)">
+      <div style="font-size:16px;font-weight:700;margin-bottom:4px">📋 Paste Excel Voucher Descriptions</div>
+      <div style="font-size:12px;color:var(--text3);margin-bottom:16px">
+        Paste the "Payment - Person - Client, Client, ..." description lines from your Excel "Due (to)" tab, one voucher per line (dates/refs/amounts are fine to include — only the description text is used). This runs as an Accounting Health check: it flags any invoice that Excel says is already paid but this dashboard still shows as unpaid, so drift like INV260607/INV260608 (Aug 2026) gets caught automatically next time.
+      </div>
+      <textarea id="_excel_voucher_text" rows="10" style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:12px;font-family:'DM Mono',monospace;resize:vertical" placeholder="Payment- ET - Grand Hill Mining, Delanis, Toong, Backpackers, NS Syahadah, June Div">${(getExcelVoucherText()||'').replace(/</g,'&lt;')}</textarea>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">
+        <button class="btn btn-ghost" onclick="document.getElementById('_excel_voucher_modal').remove()">Cancel</button>
+        <button class="btn btn-primary" onclick="_saveExcelVoucherText()">Save &amp; Check</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+function _saveExcelVoucherText() {
+  const val = (document.getElementById('_excel_voucher_text').value || '').trim();
+  setExcelVoucherText(val);
+  document.getElementById('_excel_voucher_modal').remove();
+  const res = (typeof checkExcelVoucherSync === 'function') ? checkExcelVoucherSync() : {ok:true};
+  if (res.ok) {
+    toast('✓ Saved. No drift found — everything Excel says is paid matches this dashboard.', 'success');
+  } else {
+    toast('⚠ Saved. Drift found — see Accounting Health on the Dashboard page for details.', 'error');
+  }
+  if (typeof refreshCurrentPage === 'function') { try { refreshCurrentPage(); } catch(e) {} }
 }
 
 // Silent auto-reconcile on every Payout page load.
