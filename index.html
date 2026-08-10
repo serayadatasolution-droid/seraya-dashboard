@@ -12728,6 +12728,13 @@ function renderPayoutDetail() {
     const m = key.match(/^disb_person_(.+?)_([^_]+(?:_[^_]+)*)$/);
     if (!m) continue;
     const inv_no = m[1], idx = m[2];
+    // Skip invoices already fully accounted for by the live multi-line
+    // calculator above (_bucketForLine reads each line's own `alloc` field,
+    // which already routes isDisb lines to the right person). Without this
+    // guard, a leftover disb_person_* tag from the old "Define lines" UI
+    // double-counts the same disbursement on top of the live total —
+    // this was the cause of INV260506's RM70 overstatement — fixed 2026-08-10.
+    if (_liveProcessed.has(inv_no)) continue;
     const inv = INVOICES.find(x => x.inv_no === inv_no);
     if (!inv || inv.status === 'cancelled') continue;
     // Resolve the disb amount and description
@@ -12798,6 +12805,11 @@ function renderPayoutDetail() {
     const m = key.match(/^ib_ld_(.+)_(\d+)$/);
     if (!m) continue;
     const inv_no = m[1], ldi = parseInt(m[2], 10);
+    // Same guard as the disb_person_* block above — the live multi-line
+    // calculator already routes per-line disbursement amounts via each
+    // line's `alloc` field, so a leftover ib_ld_* tag would double-count
+    // it. Fixed 2026-08-10 (INV260506 Attestation+Printing double-count).
+    if (_liveProcessed.has(inv_no)) continue;
     const inv = INVOICES.find(x => x.inv_no === inv_no);
     if (!inv || inv.status === 'cancelled') continue;
     // Read the linedefs JSON for this invoice
