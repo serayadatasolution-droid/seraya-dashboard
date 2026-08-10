@@ -4029,7 +4029,13 @@ function _bucketForLine(l, inv) {
   const K = Math.max(0, amt - lineAbot);
   const claudeRetain = _claudeOn ? K * 0.025 : 0;
   const L = K * lineRetainPct;
-  const O = K * 0.10;
+  // KC commission — always 10% of the GROSS line amount, never net-of-abot
+  // (documented firm rule). Previously computed as K*0.10 (net-of-abot),
+  // which under-stated commission whenever a line carried a real abot
+  // deduction. Confirmed against Excel's Due(to)/Allocation 2026 workings
+  // (e.g. INV260105: 750*0.10=75, 250*0.10=25 — gross-based, not net).
+  // Fixed 2026-08-10.
+  const O = amt * 0.10;
   const P = K - L - O - claudeRetain;
   // Preparer split — resolved in priority order:
   //   1. _savedAlloc.prep_pct  (GAS-stored field; works once GAS column exists)
