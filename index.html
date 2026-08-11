@@ -3995,6 +3995,38 @@ function _bucketForLine(l, inv) {
     });
     return out;
   }
+  // Cosec Retainer / Cosec Other — Cecilia takes a flat quarterly cut off
+  // retainer lines (RM75 by default), split is 50/50 prep/rev (not 70/30),
+  // and there's no abot deduction. This mirrors the modal's own allocation
+  // formula (recalcAllocation(), Cosec_Retainer/Cosec_Other branches) —
+  // _bucketForLine previously had no equivalent branch and fell through to
+  // the generic "standard formula" below, which has no Cecilia carve-out at
+  // all, silently folding her RM75 cut into the preparer/reviewer shares.
+  // Fixed 2026-08-10 (found via INV260702/703/704).
+  const _cosecLt = (l.lineType || (inv && inv.job_type) || '').trim();
+  if (_cosecLt === 'Cosec_Retainer' || _cosecLt === 'Cosec_Other') {
+    const _normCos = p => p === 'Koay PH' ? 'Koay' : p;
+    const _saCos = ((typeof ALLOCATIONS !== 'undefined') ? ALLOCATIONS : []).find(a => a && a.inv_no === (inv && inv.inv_no) && (typeof isVoided !== 'function' || !isVoided('allocations', a.alloc_id)));
+    const prepCos = _normCos(l.prepOvr || (_saCos && _saCos.preparer_name) || '');
+    const revCos  = _normCos(l.revOvr  || (_saCos && _saCos.reviewer_name) || '');
+    const cecRate  = (typeof getSetting === 'function') ? parseFloat(getSetting('cecilia_quarterly', 75)) : 75;
+    const adminPctCos = (typeof getSetting === 'function') ? parseFloat(getSetting('admin_retain_pct', 0.15)) : 0.15;
+    const kcPctCos = (typeof getSetting === 'function') ? parseFloat(getSetting('kc_commission_pct', 0.10)) : 0.10;
+    const cecFee = (_cosecLt === 'Cosec_Retainer') ? cecRate : 0;
+    const netCos = Math.max(0, amt - cecFee);
+    const claudeCos = netCos * 0.025; // Claude 2.5% applies to all invoices per system policy
+    const retainCos = netCos * adminPctCos;
+    const kcCommCos = netCos * kcPctCos;
+    const fsCos = netCos - claudeCos - retainCos - kcCommCos;
+    const prepAmtCos = fsCos * 0.5, revAmtCos = fsCos * 0.5;
+    if (cecFee > 0) out.Cecilia += cecFee;
+    out.retain += retainCos;
+    out.claude += claudeCos;
+    out.KC += kcCommCos;
+    if (out.hasOwnProperty(prepCos)) out[prepCos] += prepAmtCos;
+    if (out.hasOwnProperty(revCos))  out[revCos]  += revAmtCos;
+    return out;
+  }
   // Standard formula. Resolve invoice-level defaults from saved alloc row or
   // invoice job_type, NOT from modal DOM (which may not be open).
   const _norm = p => p === 'Koay PH' ? 'Koay' : p;
