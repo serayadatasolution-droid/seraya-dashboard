@@ -3978,11 +3978,14 @@ function _claudePolicyOn(invNo) {
 // >= setting 'kc_gross_from_inv' use gross; earlier invoices return null so
 // each engine keeps its legacy base (paid/verified allocations never shift;
 // May-2026 net-computed paid invoices stay as-is). Blank inv_no = brand-new
-// invoice → gross. Default cutover 260900 is deliberately above all existing
-// invoices — set the real cutover in Settings after Boss reviews the diff.
+// invoice → gross. Cutover 260801 per Boss decision 12 Aug 2026 (both August
+// invoices INV260801/260802 are unpaid and switch to gross; July and earlier
+// keep legacy). Hardcoded default because the deployed GAS get_settings does
+// not serve keys added directly to the Settings sheet, and save_settings
+// currently fails (_sales_orders_blob 87k > 50k cell limit — see handoff).
 function _kcBaseFor(invNo) {
   if (invNo == null || String(invNo).trim() === '') return 'gross';
-  const from = parseInt((typeof getSetting === 'function') ? getSetting('kc_gross_from_inv', 260900) : 260900, 10);
+  const from = parseInt((typeof getSetting === 'function') ? getSetting('kc_gross_from_inv', 260801) : 260801, 10);
   const n = _invSuffixNum(invNo);
   return (n !== null && n >= from) ? 'gross' : null;
 }
