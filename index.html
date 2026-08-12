@@ -3922,6 +3922,71 @@ function _parseInvLines(inv) {
   return out;
 }
 
+// ═══════════ P1 (12 Aug 2026): CANONICAL ALLOCATION CORE ═══════════
+// Single source of arithmetic for every wage-split engine. Pure function —
+// no DOM, no globals. Callers resolve inputs (overrides, prep %, Claude
+// gate, KC base) and map outputs to their own buckets/fields.
+// Rounding is caller-defined via p.rnd (identity by default; modal paths
+// pass r2, the HA editor passes 4-dp) so each path keeps its pre-P1
+// numeric behaviour.
+function computeAllocCore(p) {
+  const rnd = p.rnd || (x => x);
+  const amt        = +p.amt || 0;
+  const abot       = +p.abot || 0;
+  const koayDeduct = +p.koayDeduct || 0;
+  const commission = +p.commission || 0;
+  const retainPct  = (p.retainPct != null) ? +p.retainPct : 0.15;
+  const claudePct  = (p.claudePct != null) ? +p.claudePct : 0.025;
+  const kcPct      = (p.kcPct != null) ? +p.kcPct : 0.10;
+  let K = amt - abot - (+p.ceciliaFee || 0) - (+p.ssmFee || 0) - (+p.disbInBase || 0);
+  if (p.clampK !== false) K = Math.max(0, K);
+  K = rnd(K);
+  const retain = (p.retainOvr != null) ? +p.retainOvr : rnd(K * retainPct);
+  const claude = (p.claudeOvr != null) ? +p.claudeOvr : (p.claudeOn ? rnd(K * claudePct) : 0);
+  // KC commission base — Boss ruling 12 Aug 2026: GROSS going forward.
+  // Callers resolve via _kcBaseFor(invNo) so pre-cutover invoices keep their
+  // legacy base and paid allocations never shift.
+  const kc = (p.kcOvr != null) ? +p.kcOvr : rnd((p.kcBase === 'gross' ? amt : K) * kcPct);
+  const net = rnd(K - retain - claude - kc - koayDeduct - commission);
+  // RM20 reviewer top-up — canonical rule: eligible (MBRS etc., caller decides)
+  // && abot >= topUpAmt. Redirected out of the abot bucket, not an extra cost.
+  const topUpAmt = (p.topUpAmt != null) ? +p.topUpAmt : 20;
+  const top = (p.topOvr != null) ? +p.topOvr : ((p.topUpEligible && abot >= topUpAmt) ? topUpAmt : 0);
+  const prepPct = (p.prepPct != null) ? +p.prepPct : 0.70;
+  const prep = rnd(net * prepPct);
+  const rev  = rnd(net * (1 - prepPct)) + top;
+  const abotFirm = Math.max(0, abot - top);
+  return { K: K, retain: retain, claude: claude, kc: kc, net: net, prep: prep, rev: rev, top: top, abotFirm: abotFirm };
+}
+
+// First 6-digit run in an invoice number → comparable numeric (INV260516 → 260516).
+function _invSuffixNum(invNo) {
+  const m = String(invNo || '').match(/\d{6}/);
+  return m ? parseInt(m[0], 10) : null;
+}
+
+// Boss ruling 12 Aug 2026: the 2.5% Claude retention is legitimate and applies
+// to invoices from INV260516 onward (setting 'claude_from_inv'). Blank/new or
+// unparseable invoice numbers → policy ON (matches save-path behaviour).
+function _claudePolicyOn(invNo) {
+  const from = parseInt((typeof getSetting === 'function') ? getSetting('claude_from_inv', 260516) : 260516, 10);
+  const n = _invSuffixNum(invNo);
+  return n === null ? true : n >= from;
+}
+
+// Boss ruling 12 Aug 2026: KC 10% on GROSS going forward. Invoices numbered
+// >= setting 'kc_gross_from_inv' use gross; earlier invoices return null so
+// each engine keeps its legacy base (paid/verified allocations never shift;
+// May-2026 net-computed paid invoices stay as-is). Blank inv_no = brand-new
+// invoice → gross. Default cutover 260900 is deliberately above all existing
+// invoices — set the real cutover in Settings after Boss reviews the diff.
+function _kcBaseFor(invNo) {
+  if (invNo == null || String(invNo).trim() === '') return 'gross';
+  const from = parseInt((typeof getSetting === 'function') ? getSetting('kc_gross_from_inv', 260900) : 260900, 10);
+  const n = _invSuffixNum(invNo);
+  return (n !== null && n >= from) ? 'gross' : null;
+}
+
 function _bucketForLine(l, inv) {
   const out = { ET:0, Koay:0, Ivy:0, KC:0, Cecilia:0, retain:0, abot:0, disb:0, ceciliaFee:0, ssm:0, claude:0 };
   const amt = parseFloat(l.amt || 0);
@@ -3937,24 +4002,28 @@ function _bucketForLine(l, inv) {
     const abotV= +ha.abot || 0;
     const cec  = +ha.cecilia || 0;
     const afterL1 = bill - disb - abotV - cec;
-    // Use overrides if set; otherwise formula default.
-    const retain = (ha.retainOvr != null && ha.retainOvr !== '') ? +ha.retainOvr : afterL1 * 0.15;
-    const claude = (ha.claudeOvr != null && ha.claudeOvr !== '') ? +ha.claudeOvr : afterL1 * 0.025;
-    const kcComm = (ha.kcOvr != null && ha.kcOvr !== '') ? +ha.kcOvr : afterL1 * 0.10;
     let koayD = 0;
     if (ha.koayPct === '20')   koayD = afterL1 * 0.20;
     else if (ha.koayPct === '30') koayD = afterL1 * 0.30;
     else if (ha.koayPct === 'custom') koayD = +(ha.koayAmt || 0);
     const comm = +ha.commission || 0;
-    const net  = afterL1 - retain - claude - kcComm - koayD - comm;
     const prepPct = (ha.prepPct != null && ha.prepPct !== '') ? +ha.prepPct : 70;
-    const revPct  = 100 - prepPct;
     const topUp = +(ha.topUp || 0);
-    const prepAmt = net * prepPct / 100;
-    const revAmt  = net * revPct / 100 + topUp;
-    // Apply topUp redirect: abot bucket only gets the firm-retained portion;
-    // reviewer already includes topUp via the compute above.
-    const abotFirm = Math.max(0, abotV - topUp);
+    // P1 (12 Aug 2026): delegated to computeAllocCore (all overrides preserved;
+    // Claude default policy-gated per Boss ruling; KC legacy base = afterL1/net).
+    const _cHa = computeAllocCore({
+      amt: bill, disbInBase: disb, abot: abotV, ceciliaFee: cec, clampK: false,
+      claudeOn: _claudePolicyOn(inv && inv.inv_no),
+      retainOvr: (ha.retainOvr != null && ha.retainOvr !== '') ? +ha.retainOvr : null,
+      claudeOvr: (ha.claudeOvr != null && ha.claudeOvr !== '') ? +ha.claudeOvr : null,
+      kcOvr:     (ha.kcOvr     != null && ha.kcOvr     !== '') ? +ha.kcOvr     : null,
+      kcBase: _kcBaseFor(inv && inv.inv_no) || 'net',
+      koayDeduct: koayD, commission: comm, prepPct: prepPct / 100, topOvr: topUp,
+    });
+    const retain = _cHa.retain, claude = _cHa.claude, kcComm = _cHa.kc;
+    const prepAmt = _cHa.prep;
+    const revAmt  = _cHa.rev;
+    const abotFirm = _cHa.abotFirm;
     out.disb += disb;
     out.abot += abotFirm;
     if (cec > 0) out.Cecilia += cec;
@@ -4013,12 +4082,18 @@ function _bucketForLine(l, inv) {
     const adminPctCos = (typeof getSetting === 'function') ? parseFloat(getSetting('admin_retain_pct', 0.15)) : 0.15;
     const kcPctCos = (typeof getSetting === 'function') ? parseFloat(getSetting('kc_commission_pct', 0.10)) : 0.10;
     const cecFee = (_cosecLt === 'Cosec_Retainer') ? cecRate : 0;
-    const netCos = Math.max(0, amt - cecFee);
-    const claudeCos = netCos * 0.025; // Claude 2.5% applies to all invoices per system policy
-    const retainCos = netCos * adminPctCos;
-    const kcCommCos = netCos * kcPctCos;
-    const fsCos = netCos - claudeCos - retainCos - kcCommCos;
-    const prepAmtCos = fsCos * 0.5, revAmtCos = fsCos * 0.5;
+    // P1 (12 Aug 2026): delegated to computeAllocCore. Claude 2.5% now
+    // policy-gated (INV260516+ per Boss ruling) instead of unconditional;
+    // KC base = net (this branch's legacy) until the kc_gross_from_inv cutover.
+    const _cCos = computeAllocCore({
+      amt: amt, ceciliaFee: cecFee, claudeOn: _claudePolicyOn(inv && inv.inv_no),
+      retainPct: adminPctCos, kcPct: kcPctCos,
+      kcBase: _kcBaseFor(inv && inv.inv_no) || 'net', prepPct: 0.5,
+    });
+    const claudeCos = _cCos.claude;
+    const retainCos = _cCos.retain;
+    const kcCommCos = _cCos.kc;
+    const prepAmtCos = _cCos.prep, revAmtCos = _cCos.rev;
     if (cecFee > 0) out.Cecilia += cecFee;
     out.retain += retainCos;
     out.claude += claudeCos;
@@ -4044,7 +4119,6 @@ function _bucketForLine(l, inv) {
   // Top-up checkbox is a modal-only control; default ON when modal isn't present.
   const _topEl = document.getElementById('inv-apply-top-up');
   const topUpEnabled = _topEl ? (_topEl.checked !== false) : true;
-  const top = topUpEnabled && isMbrs && lineAbot >= abotTopUp ? abotTopUp : 0;
   // 2.5% Claude retention — resolved with localStorage as the source of truth
   // for already-saved invoices (survives GAS round-trip). The modal checkbox is
   // only consulted by recalcAllocation (the live preview while editing); here
@@ -4057,18 +4131,19 @@ function _bucketForLine(l, inv) {
   if (!_claudeOn) {
     const _sa = ((typeof ALLOCATIONS !== 'undefined') ? ALLOCATIONS : []).find(a => a && a.inv_no === (inv && inv.inv_no) && (typeof isVoided !== 'function' || !isVoided('allocations', a.alloc_id)));
     _claudeOn = !!(_sa && parseFloat(_sa.claude_retain||0) > 0.005);
+    // P1 (12 Aug 2026): no persisted Claude signal at all (no saved alloc row,
+    // no localStorage key — a brand-new/unsaved invoice) → firm policy applies
+    // (2.5% from INV260516 onward, Boss ruling). Saved invoices keep trusting
+    // their persisted flag so renders always match what was actually saved/paid.
+    if (!_claudeOn && !_sa) {
+      let _lsHasKey = false;
+      try { _lsHasKey = localStorage.getItem('claude_retain_' + (inv && inv.inv_no)) !== null; } catch(e) {}
+      if (!_lsHasKey) _claudeOn = _claudePolicyOn(inv && inv.inv_no);
+    }
   }
-  const K = Math.max(0, amt - lineAbot);
-  const claudeRetain = _claudeOn ? K * 0.025 : 0;
-  const L = K * lineRetainPct;
-  // KC commission — always 10% of the GROSS line amount, never net-of-abot
-  // (documented firm rule). Previously computed as K*0.10 (net-of-abot),
-  // which under-stated commission whenever a line carried a real abot
-  // deduction. Confirmed against Excel's Due(to)/Allocation 2026 workings
-  // (e.g. INV260105: 750*0.10=75, 250*0.10=25 — gross-based, not net).
-  // Fixed 2026-08-10.
-  const O = amt * 0.10;
-  const P = K - L - O - claudeRetain;
+  // P1 (12 Aug 2026): arithmetic moved into computeAllocCore (called below,
+  // after prep-% resolution). KC stays GROSS-based here — documented firm rule,
+  // reconciles to Excel Due(to)/Allocation 2026 (fixed 2026-08-10).
   // Preparer split — resolved in priority order:
   //   1. _savedAlloc.prep_pct  (GAS-stored field; works once GAS column exists)
   //   2. localStorage 'prep_pct_<inv_no>'  (set on save; no GAS change needed)
@@ -4102,14 +4177,17 @@ function _bucketForLine(l, inv) {
   }
   // (4) job-type default
   const _linePrepPct = _resolvedPrepPct !== null ? _resolvedPrepPct : (_isCosecLine ? 0.50 : 0.70);
-  const prep = P * _linePrepPct;
-  const rev  = P * (1 - _linePrepPct);
-  if (out.hasOwnProperty(linePrep)) out[linePrep] += prep;
-  if (out.hasOwnProperty(lineRev))  out[lineRev]  += rev + top;
-  out.KC     += O;
-  out.retain += L;
-  out.claude += claudeRetain;
-  out.abot   += Math.max(0, lineAbot - top);
+  const _cStd = computeAllocCore({
+    amt: amt, abot: lineAbot, claudeOn: _claudeOn, retainPct: lineRetainPct,
+    kcBase: 'gross', prepPct: _linePrepPct,
+    topUpEligible: topUpEnabled && isMbrs, topUpAmt: abotTopUp,
+  });
+  if (out.hasOwnProperty(linePrep)) out[linePrep] += _cStd.prep;
+  if (out.hasOwnProperty(lineRev))  out[lineRev]  += _cStd.rev;
+  out.KC     += _cStd.kc;
+  out.retain += _cStd.retain;
+  out.claude += _cStd.claude;
+  out.abot   += _cStd.abotFirm;
   return out;
 }
 
@@ -8467,25 +8545,29 @@ function recalcAllocation() {
 
   let rows = [];
   let prepAmt = 0, revAmt = 0, kcComm = 0, adminRetain = 0, abotCost = 0, claudeRetain = 0;
-  const claudeEnabled = true;  // 2.5% Claude fee applies to all invoices per system policy
+  // P1 (12 Aug 2026): Claude 2.5% policy-gated (INV260516+, Boss ruling);
+  // KC base per kc_gross_from_inv cutover (gross going forward).
+  const _invNoLive = ((document.getElementById('inv-no')||{}).value || '').trim();
+  const claudeEnabled = _claudePolicyOn(_invNoLive);
   const claudePct = 0.025;
+  const _kcBaseLive = _kcBaseFor(_invNoLive) || 'net';
+  const _kcBaseLbl = _kcBaseLive === 'gross' ? 'gross' : 'net';
 
   if (jobType === 'Cosec_Retainer') {
     // Type B
     abotCost = 0;
-    const net = gross - cecilia;
-    claudeRetain = claudeEnabled ? r2(net * claudePct) : 0;
-    adminRetain = r2(net * adminPct);
-    kcComm = r2(net * kcPct);
-    const forSplit = net - claudeRetain - adminRetain - kcComm;
-    prepAmt = r2(forSplit * 0.5);
-    revAmt  = r2(forSplit * 0.5);
+    const _cB = computeAllocCore({ amt: gross, ceciliaFee: cecilia, clampK: false,
+      claudeOn: claudeEnabled, claudePct: claudePct, retainPct: adminPct,
+      kcPct: kcPct, kcBase: _kcBaseLive, prepPct: 0.5, rnd: r2 });
+    claudeRetain = _cB.claude; adminRetain = _cB.retain; kcComm = _cB.kc;
+    prepAmt = _cB.prep;
+    revAmt  = _cB.rev;
     rows = [
       ['Gross fee', 'RM ' + gross.toFixed(2), ''],
       ['Less: Cecilia fee (quarterly)', '— RM ' + cecilia.toFixed(2), 'deduct'],
       ...(claudeEnabled ? [['Less: 2.5% Claude retention', '— RM ' + claudeRetain.toFixed(2), 'deduct']] : []),
       ['Less: 15% admin retention', '— RM ' + adminRetain.toFixed(2), 'deduct'],
-      ['Less: KC commission (10% of net)', '— RM ' + kcComm.toFixed(2), 'deduct'],
+      ['Less: KC commission (10% of ' + _kcBaseLbl + ')', '— RM ' + kcComm.toFixed(2), 'deduct'],
       ['— KC / Ho', 'RM ' + kcComm.toFixed(2), 'earn'],
       [preparer + ' (preparer 50%)', 'RM ' + prepAmt.toFixed(2), 'earn'],
       [reviewer + ' (reviewer 50%)', 'RM ' + revAmt.toFixed(2), 'earn'],
@@ -8493,19 +8575,18 @@ function recalcAllocation() {
   } else if (jobType === 'Cosec_Other') {
     // Type C
     abotCost = 0;
-    const net = gross - ssmFee;
-    claudeRetain = claudeEnabled ? r2(net * claudePct) : 0;
-    adminRetain = r2(net * adminPct);
-    kcComm = r2(net * kcPct);
-    const forSplit = net - claudeRetain - adminRetain - kcComm;
-    prepAmt = r2(forSplit * 0.5);
-    revAmt  = r2(forSplit * 0.5);
+    const _cC = computeAllocCore({ amt: gross, ssmFee: ssmFee, clampK: false,
+      claudeOn: claudeEnabled, claudePct: claudePct, retainPct: adminPct,
+      kcPct: kcPct, kcBase: _kcBaseLive, prepPct: 0.5, rnd: r2 });
+    claudeRetain = _cC.claude; adminRetain = _cC.retain; kcComm = _cC.kc;
+    prepAmt = _cC.prep;
+    revAmt  = _cC.rev;
     rows = [
       ['Gross fee', 'RM ' + gross.toFixed(2), ''],
       ['Less: SSM filing fee', '— RM ' + ssmFee.toFixed(2), 'deduct'],
       ...(claudeEnabled ? [['Less: 2.5% Claude retention', '— RM ' + claudeRetain.toFixed(2), 'deduct']] : []),
       ['Less: 15% admin retention', '— RM ' + adminRetain.toFixed(2), 'deduct'],
-      ['Less: KC commission (10% of net)', '— RM ' + kcComm.toFixed(2), 'deduct'],
+      ['Less: KC commission (10% of ' + _kcBaseLbl + ')', '— RM ' + kcComm.toFixed(2), 'deduct'],
       ['— KC / Ho', 'RM ' + kcComm.toFixed(2), 'earn'],
       [preparer + ' (preparer 50%)', 'RM ' + prepAmt.toFixed(2), 'earn'],
       [reviewer + ' (reviewer 50%)', 'RM ' + revAmt.toFixed(2), 'earn'],
@@ -8514,20 +8595,19 @@ function recalcAllocation() {
     // Type A — gross (inv-amount) is the FEE portion only; disb sits in its own
     // bucket as a pass-through and is NOT deducted from the formula base.
     abotCost = zeroAbot ? 0 : (largeAbot ? abotLg : abotStd);
-    const net = gross - abotCost;
-    claudeRetain = claudeEnabled ? r2(net * claudePct) : 0;
-    adminRetain = r2(net * adminPct);
-    kcComm = r2(net * kcPct);
-    const forSplit = net - claudeRetain - adminRetain - kcComm;
-    prepAmt = r2(forSplit * 0.7);
-    revAmt  = r2(forSplit * 0.3);
+    const _cA = computeAllocCore({ amt: gross, abot: abotCost, clampK: false,
+      claudeOn: claudeEnabled, claudePct: claudePct, retainPct: adminPct,
+      kcPct: kcPct, kcBase: _kcBaseLive, prepPct: 0.7, rnd: r2 });
+    claudeRetain = _cA.claude; adminRetain = _cA.retain; kcComm = _cA.kc;
+    prepAmt = _cA.prep;
+    revAmt  = _cA.rev;
     rows = [
       ['Gross fee', 'RM ' + gross.toFixed(2), ''],
       ['Less: Disbursements', '— RM ' + disb.toFixed(2), 'deduct'],
       ['Less: Abot software cost', '— RM ' + abotCost.toFixed(2), 'deduct'],
       ...(claudeEnabled ? [['Less: 2.5% Claude retention', '— RM ' + claudeRetain.toFixed(2), 'deduct']] : []),
       ['Less: 15% admin retention', '— RM ' + adminRetain.toFixed(2), 'deduct'],
-      ['Less: KC commission (10% of net)', '— RM ' + kcComm.toFixed(2), 'deduct'],
+      ['Less: KC commission (10% of ' + _kcBaseLbl + ')', '— RM ' + kcComm.toFixed(2), 'deduct'],
       ['— KC / Ho', 'RM ' + kcComm.toFixed(2), 'earn'],
       [preparer + ' (preparer 70%)', 'RM ' + prepAmt.toFixed(2), 'earn'],
       [reviewer + ' (reviewer 30%)', 'RM ' + revAmt.toFixed(2), 'earn'],
@@ -8817,32 +8897,34 @@ async function saveInvoice() {
   const abotTop   = parseFloat(getSetting('abot_reviewer_top', 20));
 
   let abotCost = 0, ceciliaFee = 0, adminRetain = 0, kcComm = 0, prepAmt = 0, revAmt = 0, prepPct = 0.7, revPct = 0.3, claudeRetain = 0;
-  const _claudeOn = true;  // 2.5% Claude fee applies to all invoices per system policy
+  // P1 (12 Aug 2026): Claude policy-gated (INV260516+, Boss ruling); KC base
+  // per kc_gross_from_inv cutover (gross going forward, legacy net before).
+  const _claudeOn = _claudePolicyOn(inv_no);
   const _claudePct = 0.025;
+  const _kcBaseSave = _kcBaseFor(inv_no) || 'net';
 
   if (jobType === 'Cosec_Retainer') {
     ceciliaFee = cecilia;
-    const net = gross - ceciliaFee;
-    claudeRetain = _claudeOn ? r2(net * _claudePct) : 0;
-    adminRetain = r2(net * adminPct); kcComm = r2(net * kcPct);
-    const fs = net - claudeRetain - adminRetain - kcComm;
-    prepAmt = r2(fs * 0.5); revAmt = r2(fs * 0.5); prepPct = 0.5; revPct = 0.5;
+    const _cSR = computeAllocCore({ amt: gross, ceciliaFee: ceciliaFee, clampK: false,
+      claudeOn: _claudeOn, claudePct: _claudePct, retainPct: adminPct,
+      kcPct: kcPct, kcBase: _kcBaseSave, prepPct: 0.5, rnd: r2 });
+    claudeRetain = _cSR.claude; adminRetain = _cSR.retain; kcComm = _cSR.kc;
+    prepAmt = _cSR.prep; revAmt = _cSR.rev; prepPct = 0.5; revPct = 0.5;
   } else if (jobType === 'Cosec_Other') {
-    const net = gross - ssmFee;
-    claudeRetain = _claudeOn ? r2(net * _claudePct) : 0;
-    adminRetain = r2(net * adminPct); kcComm = r2(net * kcPct);
-    const fs = net - claudeRetain - adminRetain - kcComm;
-    prepAmt = r2(fs * 0.5); revAmt = r2(fs * 0.5); prepPct = 0.5; revPct = 0.5;
+    const _cSO = computeAllocCore({ amt: gross, ssmFee: ssmFee, clampK: false,
+      claudeOn: _claudeOn, claudePct: _claudePct, retainPct: adminPct,
+      kcPct: kcPct, kcBase: _kcBaseSave, prepPct: 0.5, rnd: r2 });
+    claudeRetain = _cSO.claude; adminRetain = _cSO.retain; kcComm = _cSO.kc;
+    prepAmt = _cSO.prep; revAmt = _cSO.rev; prepPct = 0.5; revPct = 0.5;
   } else if (gross > 0.01) {
     abotCost = zeroAbot ? 0 : (largeAbot ? abotLg : abotStd);
-    // gross (inv-amount) is the FEE portion only; disb is already separate.
-    // So net = gross - abot (disb is a pass-through in its own bucket, NOT
-    // deducted from gross before splitting).
-    const net = gross - abotCost;
-    claudeRetain = _claudeOn ? r2(net * _claudePct) : 0;
-    adminRetain = r2(net * adminPct); kcComm = r2(net * kcPct);
-    const fs = net - claudeRetain - adminRetain - kcComm;
-    prepAmt = r2(fs * 0.7); revAmt = r2(fs * 0.3);
+    // gross (inv-amount) is the FEE portion only; disb is already separate
+    // (pass-through in its own bucket, NOT deducted from the formula base).
+    const _cSA = computeAllocCore({ amt: gross, abot: abotCost, clampK: false,
+      claudeOn: _claudeOn, claudePct: _claudePct, retainPct: adminPct,
+      kcPct: kcPct, kcBase: _kcBaseSave, prepPct: 0.7, rnd: r2 });
+    claudeRetain = _cSA.claude; adminRetain = _cSA.retain; kcComm = _cSA.kc;
+    prepAmt = _cSA.prep; revAmt = _cSA.rev;
   } else {
     // All lines are override-driven; standard formula gross is 0 → skip to avoid
     // negative prep/rev from (0 - abot) calc. Override flow below carries the load.
@@ -9360,20 +9442,30 @@ function recalcInvLines() {
     // MBRS-type lines get the abot top-up: RM 20 moves from abot retain to reviewer
     const isMbrs = (l.lineType || '').toUpperCase() === 'MBRS' || (l.lineType === '' && (document.getElementById('inv-job-type')||{}).value === 'MBRS');
     const _topUpEnabled = (document.getElementById('inv-apply-top-up')||{checked:true}).checked !== false;
-    const top = _topUpEnabled && isMbrs && lineAbot >= abotTopUp ? abotTopUp : 0;
-    const K = Math.max(0, l.amt - lineAbot);
-    const L = K * lineRetainPct;
-    const C = K * 0.025;  // 2.5% Claude fee — applies to all invoices per system policy
-    const O = K * 0.10;  // KC commission — always KC regardless of preparer
-    const P = K - L - C - O;
-    const prep = P * 0.7;
-    const rev = P * 0.3;
+    // P1 (12 Aug 2026): delegated to computeAllocCore — override lines now get
+    // cosec 50/50 (was hardcoded 70/30) and policy-gated Claude (INV260516+);
+    // KC base per cutover ruling (legacy here = net-of-abot).
+    const _lineJtOvr = (l.lineType || (document.getElementById('inv-job-type')||{}).value || '');
+    const _isCosecOvr = /cosec/i.test(_lineJtOvr);
+    const _invNoOvr = ((document.getElementById('inv-no')||{}).value || '').trim();
+    const _cOvr = computeAllocCore({
+      amt: l.amt, abot: lineAbot, claudeOn: _claudePolicyOn(_invNoOvr),
+      retainPct: lineRetainPct, kcBase: _kcBaseFor(_invNoOvr) || 'net',
+      prepPct: _isCosecOvr ? 0.5 : 0.7,
+      topUpEligible: _topUpEnabled && isMbrs, topUpAmt: abotTopUp,
+    });
+    const top = _cOvr.top;
+    const L = _cOvr.retain;
+    const C = _cOvr.claude;
+    const O = _cOvr.kc;
+    const prep = _cOvr.prep;
+    const rev = _cOvr.rev;
     // Credit each share to the right person
     if (_ovrByPerson.hasOwnProperty(linePrep)) _ovrByPerson[linePrep] += prep;
-    if (_ovrByPerson.hasOwnProperty(lineRev))  _ovrByPerson[lineRev]  += rev + top;  // + top-up
+    if (_ovrByPerson.hasOwnProperty(lineRev))  _ovrByPerson[lineRev]  += rev;  // top-up already included by the core
     _ovrByPerson.KC += O;  // commission always to KC
     _ovrRetain += L;
-    _ovrAbot += (lineAbot - top);  // abot retained (after top-up deduction)
+    _ovrAbot += _cOvr.abotFirm;  // abot retained (after top-up deduction)
     _ovrTop20 += top;
   });
   // Store aggregated per-person override earnings in hidden fields
@@ -12215,34 +12307,35 @@ function aeRecalc() {
   const prep = document.getElementById('ae-preparer').value;
   const rev  = document.getElementById('ae-reviewer').value;
 
-  // Net = gross minus appropriate deductions per job type
-  let net;
-  if (jt === 'Cosec_Retainer') net = G - J;      // Type B: gross minus Cecilia fee
-  else if (jt === 'Cosec_Other') net = G - ssm;  // Type C: gross minus SSM filing fee
-  else net = G - H - I;                           // Type A: gross minus disbursements and Abot
-
-  // Admin retention: 15% of net — Lee Eng rule (all job types)
-  const admin = Math.round(net * 0.15 * 100) / 100;
-
-  // KC commission: 10% of GROSS — Lee Eng rule (NOT net)
-  const kcc = Math.round(G * 0.10 * 100) / 100;
-
-  // For split: net minus admin minus KC commission
-  const forSplit = Math.round((net - admin - kcc) * 100) / 100;
-
-  // Preparer/Reviewer split:
-  //   Type A (standard jobs): 70% preparer / 30% reviewer
-  //   Type B & C (cosec): 50% preparer / 50% reviewer
   const isCosec = (jt === 'Cosec_Retainer' || jt === 'Cosec_Other');
-  const prepShare = isCosec ? 0.50 : 0.70;
-  const pAmt = Math.round(forSplit * prepShare * 100) / 100;
-  const rAmt = Math.round((forSplit - pAmt) * 100) / 100;
+  const _invNoAe = document.getElementById('ae-inv-no').value;
+  // P1 (12 Aug 2026): delegated to computeAllocCore. FIXES the silent Claude
+  // 2.5% drop (now policy-gated, INV260516+ per Boss ruling). KC stays on
+  // GROSS — this editor's documented Lee Eng rule, matching the Boss ruling.
+  const _cAe = computeAllocCore({
+    amt: G,
+    disbInBase: (isCosec ? 0 : H),
+    abot: (isCosec ? 0 : I),
+    ceciliaFee: (jt === 'Cosec_Retainer' ? J : 0),
+    ssmFee: (jt === 'Cosec_Other' ? ssm : 0),
+    clampK: false,
+    claudeOn: _claudePolicyOn(_invNoAe),
+    kcBase: 'gross',
+    prepPct: isCosec ? 0.50 : 0.70,
+    rnd: r2,
+  });
+  const admin = _cAe.retain;
+  const kcc = _cAe.kc;
+  const pAmt = _cAe.prep;
+  const rAmt = _cAe.rev;
 
-  // Reviewer top-up RM20 (sourced from Abot, not additional cost):
-  // Only for Type A when reviewer is present. Not applicable for Cosec jobs (no Abot).
-  const top20 = (!isCosec && rev) ? 20 : 0;
+  // Reviewer top-up RM20 prefill — canonical rule (MBRS && abot >= RM20),
+  // replacing the old flat "RM20 for any non-cosec job with a reviewer".
+  // Manual override in the field below remains possible.
+  const top20 = (jt === 'MBRS' && rev && I >= 20) ? 20 : 0;
 
   document.getElementById('ae-retain').value        = admin.toFixed(2);
+  document.getElementById('ae-claude-retain').value = _cAe.claude.toFixed(2);
   document.getElementById('ae-kc-comm').value       = kcc.toFixed(2);
   document.getElementById('ae-koay-comm').value     = '0.00'; // set manually if applicable
   document.getElementById('ae-preparer-amt').value  = (prep ? pAmt : 0).toFixed(2);
@@ -20694,22 +20787,32 @@ function _haCompute(row) {
   // After L1 uses FULL abot (incl. any portion later redirected to reviewer).
   // This keeps Retain/Claude/KC/Net stable regardless of the topUp toggle.
   const afterL1 = +(bill - disb - abot - cec).toFixed(4);
-  const retain = (row.retainOvr != null && row.retainOvr !== '') ? +row.retainOvr : +(afterL1 * 0.15).toFixed(4);
-  const claude = (row.claudeOvr != null && row.claudeOvr !== '') ? +row.claudeOvr : +(afterL1 * 0.025).toFixed(4);
-  const kcComm = (row.kcOvr != null && row.kcOvr !== '') ? +row.kcOvr : +(afterL1 * 0.10).toFixed(4);
   let koayDeduct = 0;
   if (row.koayPct === '20')      koayDeduct = +(afterL1 * 0.20).toFixed(4);
   else if (row.koayPct === '30') koayDeduct = +(afterL1 * 0.30).toFixed(4);
   else if (row.koayPct === 'custom') koayDeduct = +(row.koayAmt || 0);
   const comm = +row.commission || 0;
-  const net = +(afterL1 - retain - claude - kcComm - koayDeduct - comm).toFixed(4);
   const prepPct = (row.prepPct != null && row.prepPct !== '') ? +row.prepPct : 70;
   const revPct  = +(100 - prepPct).toFixed(2);
-  const prepAmt = +(net * prepPct / 100).toFixed(2);
-  // Reviewer gets net×rev% + the topUp (which moves out of the abot bucket).
-  const revAmt  = +((net * revPct / 100) + topUp).toFixed(2);
-  // Firm-retained abot = full abot − whatever was redirected to reviewer.
-  const abotFirm = +(Math.max(0, abot - topUp)).toFixed(2);
+  // P1 (12 Aug 2026): delegated to computeAllocCore (overrides preserved;
+  // Claude default policy-gated; KC legacy base = afterL1/net). The HA editor
+  // lives inside the invoice modal, so inv-no is the live invoice number.
+  const _invNoHa = ((document.getElementById('inv-no')||{}).value || '').trim();
+  const _cH = computeAllocCore({
+    amt: bill, disbInBase: disb, abot: abot, ceciliaFee: cec, clampK: false,
+    claudeOn: _claudePolicyOn(_invNoHa),
+    retainOvr: (row.retainOvr != null && row.retainOvr !== '') ? +row.retainOvr : null,
+    claudeOvr: (row.claudeOvr != null && row.claudeOvr !== '') ? +row.claudeOvr : null,
+    kcOvr:     (row.kcOvr     != null && row.kcOvr     !== '') ? +row.kcOvr     : null,
+    kcBase: _kcBaseFor(_invNoHa) || 'net',
+    koayDeduct: koayDeduct, commission: comm, prepPct: prepPct / 100,
+    topOvr: topUp, rnd: x => +(+x).toFixed(4),
+  });
+  const retain = _cH.retain, claude = _cH.claude, kcComm = _cH.kc;
+  const net = _cH.net;
+  const prepAmt = +_cH.prep.toFixed(2);
+  const revAmt  = +_cH.rev.toFixed(2);
+  const abotFirm = +_cH.abotFirm.toFixed(2);
   // Casting: bill = disb + abotFirm + cec + retain + claude + kc + koay + comm + prepAmt + revAmt
   const bucketSum = disb + abotFirm + cec + retain + claude + kcComm + koayDeduct + comm + prepAmt + revAmt;
   const diff = +(bill - bucketSum).toFixed(2);
