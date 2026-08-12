@@ -4191,7 +4191,12 @@ async function voidCancelledAllocs() {
 async function syncStaleAllocations() {
   const stale = (window.__STALE_INV_NOS || []);
   if (!stale.length) { try { toast('No stale invoices to sync.', 'info'); } catch(e){} return; }
-  if (!confirm(`Re-save allocations for ${stale.length} invoice${stale.length>1?'s':''}? This writes fresh per-person attribution to your Google Sheet.`)) return;
+  // P0 FENCE (12 Aug 2026): _liveResaveAlloc assigns preparer/reviewer by top-2 earner
+  // magnitude (not real roles), hardcodes reviewer_top20:0, drops prep_pct, and voids old
+  // rows in localStorage only. Known to corrupt records (see roadmap P2). Do not lift this
+  // fence until _liveResaveAlloc is rebuilt with role identity + dry-run preview.
+  const _fenceTyped = prompt(`\u26a0\ufe0f DANGER \u2014 Auto-sync can CORRUPT allocation records (role swaps, lost RM20 bonuses, lost split overrides).\nIt re-saves ${stale.length} invoice(s) by "top-2 earners" guesswork, not actual roles.\nOnly proceed if Boss has approved EACH invoice individually.\n\nType SYNC in capitals to proceed:`);
+  if (_fenceTyped !== 'SYNC') { try { toast('Auto-sync cancelled \u2014 fence active (see roadmap P2).', 'info'); } catch(e){} return; }
   let ok = 0, fail = 0;
   for (const invNo of stale) {
     try {
