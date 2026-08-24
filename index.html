@@ -3974,28 +3974,37 @@ function _claudePolicyOn(invNo) {
   return n === null ? true : n >= from;
 }
 
-// Boss ruling 12 Aug 2026: KC 10% on GROSS going forward. Invoices numbered
-// >= setting 'kc_gross_from_inv' use gross; earlier invoices return null so
-// each engine keeps its legacy base (paid/verified allocations never shift;
-// May-2026 net-computed paid invoices stay as-is). Blank inv_no = brand-new
-// invoice → gross. Cutover 260801 per Boss decision 12 Aug 2026 (both August
-// invoices INV260801/260802 are unpaid and switch to gross; July and earlier
-// keep legacy). Hardcoded default because the deployed GAS get_settings does
-// not serve keys added directly to the Settings sheet, and save_settings
-// currently fails (_sales_orders_blob 87k > 50k cell limit — see handoff).
+// Boss ruling 24 Aug 2026: KC 10% REVERTED to After-L1 (net) as the standing
+// basis going forward — supersedes the 12 Aug "gross" ruling. The two
+// invoices already actioned under that ruling (INV260801 H&B Wealth,
+// INV260802 2DFire — both unpaid at the time) stay pinned to gross so their
+// already-shown previews don't move. Every other invoice — earlier, later,
+// or a brand-new/blank inv_no — uses net (After L1).
+//
+// [Superseded 24 Aug] Boss ruling 12 Aug 2026: KC 10% on GROSS going forward
+// from cutover invoice 260801. Hardcoded rather than setting-driven because
+// the deployed GAS get_settings does not serve keys added directly to the
+// Settings sheet, and save_settings currently fails (_sales_orders_blob 87k
+// > 50k cell limit — see handoff).
 function _kcBaseFor(invNo) {
-  if (invNo == null || String(invNo).trim() === '') return 'gross';
-  const from = parseInt((typeof getSetting === 'function') ? getSetting('kc_gross_from_inv', 260801) : 260801, 10);
   const n = _invSuffixNum(invNo);
-  return (n !== null && n >= from) ? 'gross' : null;
+  return (n === 260801 || n === 260802) ? 'gross' : 'net';
 }
 
 function _bucketForLine(l, inv) {
   const out = { ET:0, Koay:0, Ivy:0, KC:0, Cecilia:0, retain:0, abot:0, disb:0, ceciliaFee:0, ssm:0, claude:0 };
+  // P2 (12 Aug 2026): __d exposes per-line ROLE detail (who earned what, in which
+  // role) for the rebuilt Auto-sync dry-run. Bucket consumers all use fixed key
+  // lists or hasOwnProperty guards, so the extra key is invisible to them.
+  out.__d = { prepName:'', prepAmt:0, revName:'', revAmt:0, top20:0, kcComm:0, koayComm:0, ceciliaFee:0, direct:{} };
   const amt = parseFloat(l.amt || 0);
   if (!(amt > 0.001)) return out;
   if (l.alloc === 'retain') { out.retain += amt; return out; }
-  if (out.hasOwnProperty(l.alloc)) { out[l.alloc] += amt; return out; }
+  if (out.hasOwnProperty(l.alloc)) {
+    out[l.alloc] += amt;
+    if (['ET','Koay','Ivy','KC','Cecilia'].indexOf(l.alloc) !== -1) out.__d.direct[l.alloc] = (out.__d.direct[l.alloc] || 0) + amt;
+    return out;
+  }
   if (l.isDisb) { out.disb += amt; return out; }
   // horizontalAlloc takes priority — it's the per-line table editor data.
   if (l.horizontalAlloc && typeof l.horizontalAlloc === 'object') {
@@ -4037,6 +4046,12 @@ function _bucketForLine(l, inv) {
     const pn = ha.prepName, rn = ha.revName;
     if (pn && out.hasOwnProperty(pn)) out[pn] += prepAmt;
     if (rn && out.hasOwnProperty(rn)) out[rn] += revAmt;
+    if (pn && out.hasOwnProperty(pn)) { out.__d.prepName = pn; out.__d.prepAmt += _cHa.prep; }
+    if (rn && out.hasOwnProperty(rn)) { out.__d.revName = rn; out.__d.revAmt += _cHa.rev - _cHa.top; }
+    out.__d.top20 += _cHa.top;
+    out.__d.kcComm += kcComm + comm;
+    out.__d.koayComm += koayD;
+    out.__d.ceciliaFee += cec;
     return out;
   }
   // customSplit is authoritative: route via custom-split branch whenever
@@ -4054,13 +4069,14 @@ function _bucketForLine(l, inv) {
     Object.entries(l.customSplit).forEach(([k, v]) => {
       const x = parseFloat(v||0);
       if (k === 'preparer') {
-        if (_csLinePrep && out.hasOwnProperty(_csLinePrep)) out[_csLinePrep] += x;
-        else out.KC += x;  // last-resort fallback
+        if (_csLinePrep && out.hasOwnProperty(_csLinePrep)) { out[_csLinePrep] += x; out.__d.prepName = _csLinePrep; out.__d.prepAmt += x; }
+        else { out.KC += x; out.__d.direct.KC = (out.__d.direct.KC || 0) + x; }  // last-resort fallback
       } else if (k === 'reviewer') {
-        if (_csLineRev && out.hasOwnProperty(_csLineRev)) out[_csLineRev] += x;
-        else out.KC += x;
+        if (_csLineRev && out.hasOwnProperty(_csLineRev)) { out[_csLineRev] += x; out.__d.revName = _csLineRev; out.__d.revAmt += x; }
+        else { out.KC += x; out.__d.direct.KC = (out.__d.direct.KC || 0) + x; }
       } else if (out.hasOwnProperty(k)) {
         out[k] += x;
+        if (['ET','Koay','Ivy','KC','Cecilia'].indexOf(k) !== -1) out.__d.direct[k] = (out.__d.direct[k] || 0) + x;
       } else if (k === 'retain') out.retain += x;
       else if (k === 'retainAbot') out.abot += x;
       else if (k === 'disb') out.disb += x;
@@ -4103,6 +4119,10 @@ function _bucketForLine(l, inv) {
     out.KC += kcCommCos;
     if (out.hasOwnProperty(prepCos)) out[prepCos] += prepAmtCos;
     if (out.hasOwnProperty(revCos))  out[revCos]  += revAmtCos;
+    if (out.hasOwnProperty(prepCos)) { out.__d.prepName = prepCos; out.__d.prepAmt += prepAmtCos; }
+    if (out.hasOwnProperty(revCos))  { out.__d.revName = revCos;  out.__d.revAmt  += revAmtCos; }
+    out.__d.kcComm += kcCommCos;
+    out.__d.ceciliaFee += cecFee;
     return out;
   }
   // Standard formula. Resolve invoice-level defaults from saved alloc row or
@@ -4191,6 +4211,10 @@ function _bucketForLine(l, inv) {
   out.retain += _cStd.retain;
   out.claude += _cStd.claude;
   out.abot   += _cStd.abotFirm;
+  if (out.hasOwnProperty(linePrep)) { out.__d.prepName = linePrep; out.__d.prepAmt += _cStd.prep; }
+  if (out.hasOwnProperty(lineRev))  { out.__d.revName = lineRev;  out.__d.revAmt  += _cStd.rev - _cStd.top; }
+  out.__d.top20 += _cStd.top;
+  out.__d.kcComm += _cStd.kc;
   return out;
 }
 
@@ -4198,59 +4222,115 @@ function _bucketForLine(l, inv) {
 // live per-line bucket calc. Bypasses the modal — used by the bulk
 // "Sync stale allocations" action so the user doesn't have to open and save
 // each flagged invoice individually.
-async function _liveResaveAlloc(invNo) {
+// P2 REBUILD (12 Aug 2026): role identity + dry-run.
+// - preparer/reviewer come from the lines' actual role resolution (the __d
+//   detail emitted by _bucketForLine) — NEVER from earner magnitude.
+// - reviewer_top20 recomputed under the canonical rule; abot_cost saved as
+//   FULL abot (RM20 is informational, paid from abot at payout) so the row
+//   casts to gross exactly like saveInvoice rows.
+// - prep_pct derived and saved; claude flag persisted to localStorage.
+// - Invoices not representable in the 4 person slots (3+ beneficiaries,
+//   mixed per-line preparers/reviewers) are EXCLUDED for manual handling —
+//   Boss ruling 12 Aug 2026: no silent sweeps into kc_commission.
+// - opts.dryRun: returns { ok, proposed, warnings } without writing.
+async function _liveResaveAlloc(invNo, opts) {
+  opts = opts || {};
   const inv = (INVOICES||[]).find(i => i.inv_no === invNo);
   if (!inv) return { ok: false, error: 'invoice not found' };
   const lines = _parseInvLines(inv);
   if (!lines.length) return { ok: false, error: 'no lines' };
   const agg = { ET:0, Koay:0, Ivy:0, KC:0, Cecilia:0, retain:0, abot:0, disb:0, ceciliaFee:0, ssm:0, claude:0 };
+  const d = { prepNames:{}, revNames:{}, prepAmt:0, revAmt:0, top20:0, kcComm:0, koayComm:0, cecFee:0, direct:{} };
   lines.forEach(l => {
     const b = _bucketForLine(l, inv);
     Object.keys(agg).forEach(k => { if (b[k]) agg[k] += b[k]; });
+    const ld = b.__d || {};
+    if (ld.prepName && ld.prepAmt > 0.005) { d.prepNames[ld.prepName] = 1; d.prepAmt += ld.prepAmt; }
+    if (ld.revName  && ld.revAmt  > 0.005) { d.revNames[ld.revName]  = 1; d.revAmt  += ld.revAmt; }
+    d.top20    += ld.top20 || 0;
+    d.kcComm   += ld.kcComm || 0;
+    d.koayComm += ld.koayComm || 0;
+    d.cecFee   += ld.ceciliaFee || 0;
+    Object.keys(ld.direct || {}).forEach(p => { d.direct[p] = (d.direct[p] || 0) + ld.direct[p]; });
   });
+  const prepList = Object.keys(d.prepNames);
+  const revList  = Object.keys(d.revNames);
+  if (prepList.length > 1) return { ok:false, excluded:true, error:'mixed preparers across lines (' + prepList.join(', ') + ') — handle manually in the allocation editor' };
+  if (revList.length  > 1) return { ok:false, excluded:true, error:'mixed reviewers across lines (' + revList.join(', ') + ') — handle manually in the allocation editor' };
+  const prepName = prepList[0] || '';
+  const revName  = revList[0]  || '';
+  // Fold direct person credits into a matching slot; anything else = excluded.
+  let kcCommFinal = d.kcComm, koayCommFinal = d.koayComm;
+  let prepFinal = d.prepAmt, revFinal = d.revAmt;
+  const unrep = [];
+  Object.keys(d.direct).forEach(p => {
+    const v = d.direct[p];
+    if (!(v > 0.005)) return;
+    if (p === prepName)      prepFinal += v;
+    else if (p === revName)  revFinal  += v;
+    else if (p === 'KC')     kcCommFinal += v;
+    else if (p === 'Koay')   koayCommFinal += v;
+    else unrep.push(p + ' RM' + v.toFixed(2));
+  });
+  if (unrep.length) return { ok:false, excluded:true, error:'pays people the 4 slots cannot represent (' + unrep.join(', ') + ') — handle manually in the allocation editor' };
+  // Coverage sanity: every person bucket must be exactly explained by the slots.
+  const _cov = { ET:0, Koay:0, Ivy:0, KC:0, Cecilia:0 };
+  if (prepName && _cov.hasOwnProperty(prepName)) _cov[prepName] += prepFinal;
+  if (revName  && _cov.hasOwnProperty(revName))  _cov[revName]  += revFinal + d.top20;
+  _cov.KC += kcCommFinal; _cov.Koay += koayCommFinal; _cov.Cecilia += d.cecFee;
+  const drift = ['ET','Koay','Ivy','KC','Cecilia'].filter(p => Math.abs(agg[p] - _cov[p]) > 0.02);
+  if (drift.length) return { ok:false, excluded:true, error:'slot coverage drift on ' + drift.join('/') + ' — handle manually in the allocation editor' };
   const gross = lines.reduce((s,l) => s + parseFloat(l.amt||0), 0);
-  // The saved allocation row has 4 person slots: preparer_amt, reviewer_amt,
-  // kc_commission, koay_commission. To make bucketAmts(saved) reproduce the
-  // live per-person agg, we assign the top-2 earners to preparer/reviewer
-  // slots, and route remaining KC/Koay residual to their commission slots.
-  // ET/Ivy/Cecilia residual goes to kc_commission as a catch-all.
-  const persons = ['ET','Koay','Ivy','KC','Cecilia'].filter(p => agg[p] > 0.005).sort((a,b) => agg[b] - agg[a]);
-  const prepName = persons[0] || 'KC';
-  const revName  = (persons[1] && persons[1] !== prepName) ? persons[1] : (prepName === 'KC' ? 'Koay' : 'KC');
-  const prepAmt  = agg[prepName] || 0;
-  const revAmt   = (prepName === revName) ? 0 : (agg[revName] || 0);
-  let kcComm = 0, koayComm = 0;
-  ['ET','Koay','Ivy','KC','Cecilia'].forEach(p => {
-    if (p === prepName || p === revName) return;
-    if (!(agg[p] > 0.005)) return;
-    if (p === 'Koay') koayComm += agg[p];
-    else kcComm += agg[p];
-  });
-  const allocData = {
+  const proposed = {
     inv_id:          inv.inv_id,
     inv_no:          invNo,
     job_type:        inv.job_type || '',
-    gross_fee:       gross,
-    disbursements:   agg.disb,
-    abot_cost:       agg.abot,
-    cecilia_fee:     agg.ceciliaFee || 0,
-    ssm_fee:         agg.ssm || 0,
-    admin_retain:    agg.retain,
-    claude_retain:   agg.claude || 0,
-    kc_commission:   kcComm,
-    koay_commission: koayComm,
-    net_for_split:   prepAmt + revAmt,
+    gross_fee:       r2(gross),
+    disbursements:   r2(agg.disb),
+    disb_amount:     r2(agg.disb),
+    abot_cost:       r2(agg.abot + d.top20),
+    cecilia_fee:     r2(d.cecFee),
+    ssm_fee:         r2(agg.ssm || 0),
+    admin_retain:    r2(agg.retain),
+    claude_retain:   r2(agg.claude || 0),
+    kc_commission:   r2(kcCommFinal),
+    koay_commission: r2(koayCommFinal),
+    net_for_split:   r2(prepFinal + revFinal),
     preparer_name:   prepName,
-    preparer_amt:    prepAmt,
+    preparer_amt:    r2(prepFinal),
     reviewer_name:   revName,
-    reviewer_amt:    revAmt,
-    reviewer_top20:  0,
+    reviewer_amt:    r2(revFinal),
+    reviewer_top20:  r2(d.top20),
+    prep_pct:        (prepFinal + revFinal > 0.01) ? Math.round(prepFinal / (prepFinal + revFinal) * 100) : '',
   };
-  const res = await api({ action: 'save_allocation', data: allocData });
+  // Casting check (same formula as the Allocation Freshness health check).
+  const castSum = proposed.preparer_amt + proposed.reviewer_amt + proposed.kc_commission
+                + proposed.koay_commission + proposed.admin_retain + proposed.abot_cost
+                + proposed.disbursements + proposed.cecilia_fee + proposed.ssm_fee
+                + proposed.claude_retain;
+  const castDiff = r2(gross - castSum);
+  const warnings = [];
+  if (Math.abs(castDiff) > 0.05) warnings.push('cast off by RM' + castDiff.toFixed(2));
+  const savedRow = (ALLOCATIONS||[]).filter(a => a.inv_no === invNo && !isVoided('allocations', a.alloc_id)).slice(-1)[0] || null;
+  if (savedRow) {
+    const _n = p => p === 'Koay PH' ? 'Koay' : (p || '');
+    if (_n(savedRow.preparer_name) !== prepName || _n(savedRow.reviewer_name) !== revName)
+      warnings.push('role change: ' + _n(savedRow.preparer_name) + '/' + _n(savedRow.reviewer_name) + ' → ' + (prepName||'—') + '/' + (revName||'—'));
+    if (Math.abs(parseFloat(savedRow.reviewer_top20||0) - proposed.reviewer_top20) > 0.01)
+      warnings.push('RM20 top-up: ' + parseFloat(savedRow.reviewer_top20||0).toFixed(0) + ' → ' + proposed.reviewer_top20.toFixed(0));
+  }
+  if (opts.dryRun) return { ok: true, proposed: proposed, warnings: warnings, castDiff: castDiff, saved: savedRow };
+  if (Math.abs(castDiff) > 0.05) return { ok:false, excluded:true, error:'proposed row does not cast to gross (off RM' + castDiff.toFixed(2) + ') — not saved' };
+  const res = await api({ action: 'save_allocation', data: proposed });
   try {
     const newId = (res && res.data && res.data.alloc_id) || null;
     (ALLOCATIONS||[]).filter(a => a.inv_no === invNo && (!newId || a.alloc_id !== newId) && !isVoided('allocations', a.alloc_id))
       .forEach(a => { if (a.alloc_id) addVoidId('allocations', a.alloc_id); });
+  } catch(e) {}
+  try {
+    if (proposed.claude_retain > 0.005) localStorage.setItem('claude_retain_' + invNo, proposed.claude_retain);
+    else localStorage.removeItem('claude_retain_' + invNo);
+    if (proposed.prep_pct !== '' && proposed.prep_pct > 0 && proposed.prep_pct < 100) localStorage.setItem('prep_pct_' + invNo, proposed.prep_pct);
   } catch(e) {}
   return res;
 }
@@ -4269,25 +4349,84 @@ async function voidCancelledAllocs() {
 
 // Bulk re-save every invoice currently flagged by the Allocation Freshness
 // or Payout Tally health checks. Triggered from a button next to the chip.
+// P2 (12 Aug 2026): the P0 typed-SYNC fence is replaced by a DRY-RUN PREVIEW.
+// Nothing is written until the user clicks Apply on a specific invoice row.
 async function syncStaleAllocations() {
   const stale = (window.__STALE_INV_NOS || []);
   if (!stale.length) { try { toast('No stale invoices to sync.', 'info'); } catch(e){} return; }
-  // P0 FENCE (12 Aug 2026): _liveResaveAlloc assigns preparer/reviewer by top-2 earner
-  // magnitude (not real roles), hardcodes reviewer_top20:0, drops prep_pct, and voids old
-  // rows in localStorage only. Known to corrupt records (see roadmap P2). Do not lift this
-  // fence until _liveResaveAlloc is rebuilt with role identity + dry-run preview.
-  const _fenceTyped = prompt(`\u26a0\ufe0f DANGER \u2014 Auto-sync can CORRUPT allocation records (role swaps, lost RM20 bonuses, lost split overrides).\nIt re-saves ${stale.length} invoice(s) by "top-2 earners" guesswork, not actual roles.\nOnly proceed if Boss has approved EACH invoice individually.\n\nType SYNC in capitals to proceed:`);
-  if (_fenceTyped !== 'SYNC') { try { toast('Auto-sync cancelled \u2014 fence active (see roadmap P2).', 'info'); } catch(e){} return; }
-  let ok = 0, fail = 0;
+  const rows = [];
   for (const invNo of stale) {
-    try {
-      const r = await _liveResaveAlloc(invNo);
-      if (r && r.ok) ok++; else fail++;
-    } catch(e) { fail++; }
+    let r;
+    try { r = await _liveResaveAlloc(invNo, { dryRun: true }); }
+    catch(e) { r = { ok:false, error: String(e) }; }
+    const inv = (INVOICES||[]).find(i => i.inv_no === invNo) || {};
+    rows.push({ invNo: invNo, client: (inv.client_name||'').slice(0,26), r: r });
   }
-  try { toast(`Sync done — ${ok} ok, ${fail} failed.`, 'success'); } catch(e){}
-  if (typeof loadAllocations === 'function') await loadAllocations();
-  if (typeof loadDashboard === 'function') loadDashboard();
+  const fmt = n => (n == null ? '—' : (+n).toFixed(2));
+  const cell = (nv, ov) => {
+    const changed = ov != null && Math.abs((+nv||0) - (+ov||0)) > 0.01;
+    return '<td style="text-align:right;padding:4px 6px;font-family:\'DM Mono\',monospace;font-size:11px;' + (changed ? 'color:#b45309;font-weight:600' : '') + '">' + fmt(nv) + (changed ? '<div style="font-size:9px;color:var(--text3)">was ' + fmt(ov) + '</div>' : '') + '</td>';
+  };
+  const bodyRows = rows.map(x => {
+    if (!x.r || !x.r.ok) {
+      return '<tr style="border-bottom:1px solid var(--border);background:#FDF2F2"><td style="padding:4px 6px;font-size:11px">' + x.invNo + '</td><td style="padding:4px 6px;font-size:11px">' + x.client + '</td><td colspan="10" style="padding:4px 6px;font-size:11px;color:#b91c1c">EXCLUDED — ' + ((x.r && x.r.error) || 'error') + '</td><td style="padding:4px 6px;font-size:11px;text-align:center">manual</td></tr>';
+    }
+    const p = x.r.proposed, s = x.r.saved || {};
+    const warn = (x.r.warnings && x.r.warnings.length) ? '<div style="font-size:9.5px;color:#b45309;margin-top:2px">⚠ ' + x.r.warnings.join(' · ') + '</div>' : '';
+    return '<tr style="border-bottom:1px solid var(--border)">'
+      + '<td style="padding:4px 6px;font-size:11px">' + x.invNo + warn + '</td>'
+      + '<td style="padding:4px 6px;font-size:11px">' + x.client + '</td>'
+      + '<td style="padding:4px 6px;font-size:11px">' + (p.preparer_name||'—') + (s.preparer_name && s.preparer_name !== p.preparer_name ? '<div style="font-size:9px;color:var(--text3)">was ' + s.preparer_name + '</div>' : '') + '</td>'
+      + cell(p.preparer_amt, s.preparer_amt)
+      + '<td style="padding:4px 6px;font-size:11px">' + (p.reviewer_name||'—') + (s.reviewer_name && s.reviewer_name !== p.reviewer_name ? '<div style="font-size:9px;color:var(--text3)">was ' + s.reviewer_name + '</div>' : '') + '</td>'
+      + cell(p.reviewer_amt, s.reviewer_amt)
+      + cell(p.kc_commission, s.kc_commission)
+      + cell(p.koay_commission, s.koay_commission)
+      + cell(p.admin_retain, s.admin_retain)
+      + cell(p.abot_cost, s.abot_cost)
+      + cell(p.claude_retain, s.claude_retain)
+      + cell(p.reviewer_top20, s.reviewer_top20)
+      + '<td style="padding:4px 6px;text-align:center"><button class="btn btn-primary" style="font-size:10.5px;padding:3px 10px" onclick="_applySyncOne(\'' + x.invNo + '\', this)">Apply</button></td>'
+      + '</tr>';
+  }).join('');
+  const overlayId = '_sync_preview_overlay';
+  document.getElementById(overlayId)?.remove();
+  const ov = document.createElement('div');
+  ov.id = overlayId;
+  ov.className = 'modal-overlay open';
+  ov.style.zIndex = '9999';
+  ov.innerHTML = '<div class="modal" style="max-width:1180px;width:96vw">'
+    + '<div class="modal-header"><div class="modal-title">Auto-sync dry-run — ' + rows.length + ' flagged invoice(s), nothing saved yet</div><button class="modal-close" onclick="document.getElementById(\'' + overlayId + '\').remove()">✕</button></div>'
+    + '<div class="modal-body" style="max-height:70vh;overflow:auto">'
+    + '<div style="margin-bottom:8px;font-size:11.5px;color:var(--text2)">Each row shows the PROPOSED saved allocation (role-identity rebuild, 12 Aug 2026). Amber = differs from the current saved row. EXCLUDED rows must be fixed in the allocation editor. Apply saves ONE invoice and voids its old row(s).</div>'
+    + '<table style="width:100%;border-collapse:collapse"><thead><tr style="background:var(--surface2);font-size:10px;text-transform:uppercase;color:var(--text3)">'
+    + '<th style="padding:4px 6px;text-align:left">Invoice</th><th style="padding:4px 6px;text-align:left">Client</th>'
+    + '<th style="padding:4px 6px;text-align:left">Preparer</th><th style="padding:4px 6px;text-align:right">Amt</th>'
+    + '<th style="padding:4px 6px;text-align:left">Reviewer</th><th style="padding:4px 6px;text-align:right">Amt</th>'
+    + '<th style="padding:4px 6px;text-align:right">KC comm</th><th style="padding:4px 6px;text-align:right">Koay comm</th>'
+    + '<th style="padding:4px 6px;text-align:right">Retain</th><th style="padding:4px 6px;text-align:right">Abot</th>'
+    + '<th style="padding:4px 6px;text-align:right">Claude</th><th style="padding:4px 6px;text-align:right">RM20</th>'
+    + '<th style="padding:4px 6px;text-align:center">Action</th>'
+    + '</tr></thead><tbody>' + bodyRows + '</tbody></table></div>'
+    + '<div class="modal-footer"><button class="btn btn-ghost" onclick="document.getElementById(\'' + overlayId + '\').remove()">Close</button></div>'
+    + '</div>';
+  document.body.appendChild(ov);
+}
+
+async function _applySyncOne(invNo, btn) {
+  if (!confirm('Save the re-computed allocation for ' + invNo + ' and void its old row(s)?')) return;
+  if (btn) { btn.disabled = true; btn.textContent = 'saving…'; }
+  let r;
+  try { r = await _liveResaveAlloc(invNo); } catch(e) { r = { ok:false, error:String(e) }; }
+  if (r && r.ok) {
+    if (btn) btn.textContent = '✓ saved';
+    try { toast(invNo + ' allocation re-saved.', 'success'); } catch(e){}
+    if (typeof loadAllocations === 'function') await loadAllocations();
+    if (typeof loadDashboard === 'function') loadDashboard();
+  } else {
+    if (btn) { btn.disabled = false; btn.textContent = 'Apply'; }
+    alert('Save failed for ' + invNo + ': ' + ((r && r.error) || 'unknown'));
+  }
 }
 
 function computeAccountValue(acct, invoices, vouchers) {
@@ -5755,6 +5894,10 @@ function runAccountingHealth(receipts, vouchers) {
             if (rn && saved.hasOwnProperty(rn)) saved[rn] += rev + top;
             saved.KC   += kcc;
             saved.Koay += koac;
+            // P2 fix (12 Aug 2026): credit the saved row's cecilia_fee to Cecilia —
+            // without this, cosec invoices with her quarterly fee false-flag as
+            // attribution drift (the fee sits in out.Cecilia on the live side).
+            saved.Cecilia += parseFloat(a.cecilia_fee||0);
             const mismatches = ['ET','Koay','Ivy','KC','Cecilia'].filter(p => Math.abs(live[p] - saved[p]) > 0.5);
             if (mismatches.length) reason = `attribution drift (${mismatches.join('/')})`;
           }
@@ -8252,7 +8395,7 @@ function _applyDraftStateToModal(state) {
   if (state.large_abot && document.getElementById('inv-large-abot')) document.getElementById('inv-large-abot').value = state.large_abot;
   if (state.lines && state.lines.length && typeof clearInvLines === 'function') {
     clearInvLines();
-    state.lines.forEach(l => addInvLine(l.desc, l.amt, l.isDisb, l.alloc, l.customSplit, {prepOvr:l.prepOvr, revOvr:l.revOvr, abotOvr:l.abotOvr, retainOvr:l.retainOvr, lineType:l.lineType}));
+    state.lines.forEach(l => addInvLine(l.desc, l.amt, l.isDisb, l.alloc, l.customSplit, {prepOvr:l.prepOvr, revOvr:l.revOvr, abotOvr:l.abotOvr, retainOvr:l.retainOvr, lineType:l.lineType}, l.horizontalAlloc));
   }
   // Recompute inv-amount + inv-disb totals so allocation preview uses the restored lines
   if (typeof recalcInvLines === 'function') { try { recalcInvLines(); } catch(e){} }
@@ -8414,7 +8557,7 @@ async function openInvoiceModal(id) {
         } else {
           addInvLine(l.desc, l.amt, l.isDisb, l.alloc, l.customSplit, {
             prepOvr:l.prepOvr, revOvr:l.revOvr, abotOvr:l.abotOvr, retainOvr:l.retainOvr, lineType:l.lineType,
-          });
+          }, l.horizontalAlloc);
         }
       });
       if (_autoSplitOccurred.length) {
