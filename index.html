@@ -9132,6 +9132,9 @@ async function saveInvoice() {
   };
   const _ovrRetain = parseFloat((document.getElementById('inv-ovr-retain') || {}).value || 0);
   const _ovrAbot = parseFloat((document.getElementById('inv-ovr-abot') || {}).value || 0);
+  // BUGFIX (27 Aug 2026): commission earned on override lines, tracked separately
+  // from reviewer_amt — see matching fix in recalcInvLines().
+  const _ovrKcComm = parseFloat((document.getElementById('inv-ovr-kc-comm') || {}).value || 0);
   const _normP = p => p === 'Koay PH' ? 'Koay' : p;
   // Route each person's override total to the right field.
   // SKIP when _ppActive: the top-level Preparer Split % is the authoritative
@@ -9149,6 +9152,9 @@ async function saveInvoice() {
   }
   const _adminRetainFinal = adminRetain + _retainExtra2 + (_ppActive ? 0 : _ovrRetain);
   const _abotCostFinal = abotCost + _customRetainAbot + (_ppActive ? 0 : _ovrAbot);
+  // BUGFIX (27 Aug 2026): add override-line KC commission directly — never routed
+  // through the per-person bucket, so it can no longer be swallowed by reviewer_amt.
+  if (!_ppActive) _kcCommFinal += _ovrKcComm;
   // Total invoice gross now includes ALL line items
   const _grossFinal = gross + disb + _retainExtra2 + Object.values(_reimburse2).reduce((s,n)=>s+n,0);
 
@@ -9573,7 +9579,7 @@ function recalcInvLines() {
   const norm = p => p === 'Koay PH' ? 'Koay' : p;
   // Per-person earnings from override lines
   const _ovrByPerson = { ET:0, Koay:0, Ivy:0, KC:0, Cecilia:0 };
-  let _ovrRetain = 0, _ovrAbot = 0, _ovrTop20 = 0;
+  let _ovrRetain = 0, _ovrAbot = 0, _ovrTop20 = 0, _ovrKcComm = 0;
   let _hasOvr = false;
   const abotTopUp = parseFloat(getSetting('abot_reviewer_top', 20));
   lines.forEach(l => {
@@ -9609,7 +9615,12 @@ function recalcInvLines() {
     // Credit each share to the right person
     if (_ovrByPerson.hasOwnProperty(linePrep)) _ovrByPerson[linePrep] += prep;
     if (_ovrByPerson.hasOwnProperty(lineRev))  _ovrByPerson[lineRev]  += rev;  // top-up already included by the core
-    _ovrByPerson.KC += O;  // commission always to KC
+    // BUGFIX (27 Aug 2026): KC's commission must never be folded into the same
+    // per-person bucket as prep/rev shares — when the reviewer is also KC (the
+    // common case), the whole bucket was being dumped into reviewer_amt below,
+    // silently zeroing kc_commission and inflating reviewer_amt by the commission
+    // (and top-up). Track commission in its own accumulator instead.
+    _ovrKcComm += O;  // commission, tracked separately from any person's prep/rev share
     _ovrRetain += L;
     _ovrAbot += _cOvr.abotFirm;  // abot retained (after top-up deduction)
     _ovrTop20 += top;
@@ -9623,7 +9634,7 @@ function recalcInvLines() {
     }
     el.value = amt.toFixed(2);
   });
-  ['ovr-retain','ovr-abot','ovr-line-amount'].forEach(id => {
+  ['ovr-retain','ovr-abot','ovr-line-amount','ovr-kc-comm'].forEach(id => {
     let el = document.getElementById('inv-' + id);
     if (!el) {
       el = document.createElement('input'); el.type = 'hidden'; el.id = 'inv-' + id;
@@ -9632,6 +9643,7 @@ function recalcInvLines() {
   });
   document.getElementById('inv-ovr-retain').value = _ovrRetain.toFixed(2);
   document.getElementById('inv-ovr-abot').value = _ovrAbot.toFixed(2);
+  document.getElementById('inv-ovr-kc-comm').value = _ovrKcComm.toFixed(2);
   const ovrLineAmount = lines.filter(l => l.alloc==='standard' && !l.isDisb && (l.prepOvr||l.revOvr||l.abotOvr||l.retainOvr)).reduce((s,l)=>s+l.amt,0);
   document.getElementById('inv-ovr-line-amount').value = ovrLineAmount.toFixed(2);
   if (_hasOvr) {
