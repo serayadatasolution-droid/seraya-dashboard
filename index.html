@@ -3991,6 +3991,22 @@ function _kcBaseFor(invNo) {
   return (n === 260801 || n === 260802) ? 'gross' : 'net';
 }
 
+// BUGFIX (30 Aug 2026): Koay's own conditional commission — Excel master rule
+// (per Boss, confirmed 30 Aug 2026): 20% of K on Tax/Personal_Tax jobs, 30% on
+// Audit jobs, or 30% on MBRS jobs where Koay is the reviewer. 0% otherwise.
+// KC's 10% commission is universal (every job); Koay's is job-type-dependent
+// and was previously not computed anywhere in the real save path — only the
+// dry-run-only _bucketForLine/horizontalAlloc engine had an equivalent
+// (ha.koayPct), never the actual recalcInvLines()/saveInvoice() formula.
+function _koayCommPctFor(jobType, reviewerName) {
+  const jt = (jobType || '').trim();
+  const isKoayRev = reviewerName === 'Koay' || reviewerName === 'Koay PH';
+  if (jt === 'Tax' || jt === 'Personal_Tax') return 0.20;
+  if (jt === 'Audit') return 0.30;
+  if (jt === 'MBRS' && isKoayRev) return 0.30;
+  return 0;
+}
+
 function _bucketForLine(l, inv) {
   const out = { ET:0, Koay:0, Ivy:0, KC:0, Cecilia:0, retain:0, abot:0, disb:0, ceciliaFee:0, ssm:0, claude:0 };
   // P2 (12 Aug 2026): __d exposes per-line ROLE detail (who earned what, in which
@@ -9042,12 +9058,15 @@ async function saveInvoice() {
   const abotLg    = parseFloat(getSetting('abot_large', 100));
   const abotTop   = parseFloat(getSetting('abot_reviewer_top', 20));
 
-  let abotCost = 0, ceciliaFee = 0, adminRetain = 0, kcComm = 0, prepAmt = 0, revAmt = 0, prepPct = 0.7, revPct = 0.3, claudeRetain = 0;
+  let abotCost = 0, ceciliaFee = 0, adminRetain = 0, kcComm = 0, koayComm = 0, prepAmt = 0, revAmt = 0, prepPct = 0.7, revPct = 0.3, claudeRetain = 0;
   // P1 (12 Aug 2026): Claude policy-gated (INV260516+, Boss ruling); KC base
   // per kc_gross_from_inv cutover (gross going forward, legacy net before).
   const _claudeOn = _claudePolicyOn(inv_no);
   const _claudePct = 0.025;
   const _kcBaseSave = _kcBaseFor(inv_no) || 'net';
+  // Koay's conditional commission (see _koayCommPctFor) — deducted from K
+  // alongside retain/claude/KC-commission, same as computeAllocCore's koayDeduct.
+  const _revNameForKoay = (document.getElementById('inv-reviewer')||{}).value;
 
   if (jobType === 'Cosec_Retainer') {
     ceciliaFee = cecilia;
@@ -9066,11 +9085,16 @@ async function saveInvoice() {
     abotCost = zeroAbot ? 0 : (largeAbot ? abotLg : abotStd);
     // gross (inv-amount) is the FEE portion only; disb is already separate
     // (pass-through in its own bucket, NOT deducted from the formula base).
+    // Koay's conditional commission is sized off K (after abot, before retain/
+    // claude/KC) — same base as computeAllocCore's own koayDeduct semantics —
+    // so compute K once up front via a clamped subtraction matching the core.
+    const _kForKoaySA = Math.max(0, gross - abotCost);
+    const _koayDeductSA = r2(_kForKoaySA * _koayCommPctFor(jobType, _revNameForKoay));
     const _cSA = computeAllocCore({ amt: gross, abot: abotCost, clampK: false,
       claudeOn: _claudeOn, claudePct: _claudePct, retainPct: adminPct,
-      kcPct: kcPct, kcBase: _kcBaseSave, prepPct: 0.7, rnd: r2 });
+      kcPct: kcPct, kcBase: _kcBaseSave, prepPct: 0.7, koayDeduct: _koayDeductSA, rnd: r2 });
     claudeRetain = _cSA.claude; adminRetain = _cSA.retain; kcComm = _cSA.kc;
-    prepAmt = _cSA.prep; revAmt = _cSA.rev;
+    prepAmt = _cSA.prep; revAmt = _cSA.rev; koayComm = _koayDeductSA;
   } else {
     // All lines are override-driven; standard formula gross is 0 → skip to avoid
     // negative prep/rev from (0 - abot) calc. Override flow below carries the load.
@@ -9104,7 +9128,7 @@ async function saveInvoice() {
   };
   const _prepName = document.getElementById('inv-preparer').value;
   const _revName  = document.getElementById('inv-reviewer').value;
-  let _prepFinal = prepAmt, _revFinal = revAmt, _kcCommFinal = kcComm, _koayCommFinal = 0;
+  let _prepFinal = prepAmt, _revFinal = revAmt, _kcCommFinal = kcComm, _koayCommFinal = koayComm;
   // Add reimbursement to person directly (preparer/reviewer add to their amt; others go to commission fields)
   const norm = p => p === 'Koay PH' ? 'Koay' : p;
   Object.entries(_reimburse2).forEach(([person, amt]) => {
@@ -9135,6 +9159,9 @@ async function saveInvoice() {
   // BUGFIX (27 Aug 2026): commission earned on override lines, tracked separately
   // from reviewer_amt — see matching fix in recalcInvLines().
   const _ovrKcComm = parseFloat((document.getElementById('inv-ovr-kc-comm') || {}).value || 0);
+  // BUGFIX (30 Aug 2026): Koay's conditional commission earned on override lines —
+  // same treatment, see matching accumulator in recalcInvLines().
+  const _ovrKoayComm = parseFloat((document.getElementById('inv-ovr-koay-comm') || {}).value || 0);
   const _normP = p => p === 'Koay PH' ? 'Koay' : p;
   // Route each person's override total to the right field.
   // SKIP when _ppActive: the top-level Preparer Split % is the authoritative
@@ -9155,6 +9182,8 @@ async function saveInvoice() {
   // BUGFIX (27 Aug 2026): add override-line KC commission directly — never routed
   // through the per-person bucket, so it can no longer be swallowed by reviewer_amt.
   if (!_ppActive) _kcCommFinal += _ovrKcComm;
+  // BUGFIX (30 Aug 2026): same treatment for Koay's conditional commission.
+  if (!_ppActive) _koayCommFinal += _ovrKoayComm;
   // Total invoice gross now includes ALL line items
   const _grossFinal = gross + disb + _retainExtra2 + Object.values(_reimburse2).reduce((s,n)=>s+n,0);
 
@@ -9579,7 +9608,7 @@ function recalcInvLines() {
   const norm = p => p === 'Koay PH' ? 'Koay' : p;
   // Per-person earnings from override lines
   const _ovrByPerson = { ET:0, Koay:0, Ivy:0, KC:0, Cecilia:0 };
-  let _ovrRetain = 0, _ovrAbot = 0, _ovrTop20 = 0, _ovrKcComm = 0;
+  let _ovrRetain = 0, _ovrAbot = 0, _ovrTop20 = 0, _ovrKcComm = 0, _ovrKoayComm = 0;
   let _hasOvr = false;
   const abotTopUp = parseFloat(getSetting('abot_reviewer_top', 20));
   lines.forEach(l => {
@@ -9600,10 +9629,17 @@ function recalcInvLines() {
     const _lineJtOvr = (l.lineType || (document.getElementById('inv-job-type')||{}).value || '');
     const _isCosecOvr = /cosec/i.test(_lineJtOvr);
     const _invNoOvr = ((document.getElementById('inv-no')||{}).value || '').trim();
+    // BUGFIX (30 Aug 2026): Koay's conditional commission, per line — same rule
+    // as the standard-formula branch in saveInvoice() (_koayCommPctFor). Cosec
+    // lines are excluded (not part of the confirmed rule; they already have
+    // their own 50/50 carve-out).
+    const _koayPctOvr = _isCosecOvr ? 0 : _koayCommPctFor(_lineJtOvr, lineRev);
+    const _kForKoayOvr = Math.max(0, (+l.amt || 0) - lineAbot);
+    const _koayDeductOvr = _koayPctOvr > 0 ? +(_kForKoayOvr * _koayPctOvr).toFixed(2) : 0;
     const _cOvr = computeAllocCore({
       amt: l.amt, abot: lineAbot, claudeOn: _claudePolicyOn(_invNoOvr),
       retainPct: lineRetainPct, kcBase: _kcBaseFor(_invNoOvr) || 'net',
-      prepPct: _isCosecOvr ? 0.5 : 0.7,
+      prepPct: _isCosecOvr ? 0.5 : 0.7, koayDeduct: _koayDeductOvr,
       topUpEligible: _topUpEnabled && isMbrs, topUpAmt: abotTopUp,
     });
     const top = _cOvr.top;
@@ -9621,6 +9657,7 @@ function recalcInvLines() {
     // silently zeroing kc_commission and inflating reviewer_amt by the commission
     // (and top-up). Track commission in its own accumulator instead.
     _ovrKcComm += O;  // commission, tracked separately from any person's prep/rev share
+    _ovrKoayComm += _koayDeductOvr;  // Koay's own conditional commission, same treatment
     _ovrRetain += L;
     _ovrAbot += _cOvr.abotFirm;  // abot retained (after top-up deduction)
     _ovrTop20 += top;
@@ -9634,7 +9671,7 @@ function recalcInvLines() {
     }
     el.value = amt.toFixed(2);
   });
-  ['ovr-retain','ovr-abot','ovr-line-amount','ovr-kc-comm'].forEach(id => {
+  ['ovr-retain','ovr-abot','ovr-line-amount','ovr-kc-comm','ovr-koay-comm'].forEach(id => {
     let el = document.getElementById('inv-' + id);
     if (!el) {
       el = document.createElement('input'); el.type = 'hidden'; el.id = 'inv-' + id;
@@ -9644,6 +9681,7 @@ function recalcInvLines() {
   document.getElementById('inv-ovr-retain').value = _ovrRetain.toFixed(2);
   document.getElementById('inv-ovr-abot').value = _ovrAbot.toFixed(2);
   document.getElementById('inv-ovr-kc-comm').value = _ovrKcComm.toFixed(2);
+  document.getElementById('inv-ovr-koay-comm').value = _ovrKoayComm.toFixed(2);
   const ovrLineAmount = lines.filter(l => l.alloc==='standard' && !l.isDisb && (l.prepOvr||l.revOvr||l.abotOvr||l.retainOvr)).reduce((s,l)=>s+l.amt,0);
   document.getElementById('inv-ovr-line-amount').value = ovrLineAmount.toFixed(2);
   if (_hasOvr) {
