@@ -1675,6 +1675,12 @@
                  placeholder="70" oninput="recalcAllocation()"
                  style="width:80px;text-align:right" />
         </div>
+        <div class="form-field" id="alloc-koay-tax-wrap">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);cursor:pointer;padding:9px 11px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg)">
+            <input type="checkbox" id="inv-koay-tax-comm" onchange="recalcAllocation()" />
+            Koay commission — Tax comp portion (20%)
+          </label>
+        </div>
         <div class="form-field" id="alloc-ssm-wrap" style="display:none">
           <label>SSM Filing Fee (RM)</label>
           <input type="number" id="inv-ssm-fee" step="0.01" placeholder="0.00" value="0" oninput="recalcAllocation()" />
@@ -3991,19 +3997,22 @@ function _kcBaseFor(invNo) {
   return (n === 260801 || n === 260802) ? 'gross' : 'net';
 }
 
-// BUGFIX (30 Aug 2026): Koay's own conditional commission — Excel master rule
-// (per Boss, confirmed 30 Aug 2026): 20% of K on Tax/Personal_Tax jobs, 30% on
-// Audit jobs, or 30% on MBRS jobs where Koay is the reviewer. 0% otherwise.
-// KC's 10% commission is universal (every job); Koay's is job-type-dependent
-// and was previously not computed anywhere in the real save path — only the
-// dry-run-only _bucketForLine/horizontalAlloc engine had an equivalent
-// (ha.koayPct), never the actual recalcInvLines()/saveInvoice() formula.
-function _koayCommPctFor(jobType, reviewerName) {
+// BUGFIX (30 Aug 2026, revised same day): Koay's own conditional commission.
+// KC's 10% commission is universal (every job); Koay's is NOT derivable from
+// job_type alone — confirmed via INV260605 vs INV260302 (both Tax, near-
+// identical, only one carries a Koay commission in Excel) that "usually 20% on
+// Tax" has real exceptions the job type can't distinguish. Per Boss (30 Aug
+// 2026): MBRS-where-Koay-reviews stays automatic at 30% (no exceptions found).
+// The old Audit-30% rule is retired — Audit jobs no longer carry any Koay
+// commission. Tax's 20% is no longer auto-applied by job_type; it requires the
+// explicit "Koay commission — Tax comp portion (20%)" checkbox (#inv-koay-tax-
+// comm) to be ticked on that specific invoice, defaulting unchecked so nothing
+// changes unless someone deliberately opts in.
+function _koayCommPctFor(jobType, reviewerName, koayTaxChecked) {
   const jt = (jobType || '').trim();
   const isKoayRev = reviewerName === 'Koay' || reviewerName === 'Koay PH';
-  if (jt === 'Tax' || jt === 'Personal_Tax') return 0.20;
-  if (jt === 'Audit') return 0.30;
   if (jt === 'MBRS' && isKoayRev) return 0.30;
+  if ((jt === 'Tax' || jt === 'Personal_Tax') && koayTaxChecked) return 0.20;
   return 0;
 }
 
@@ -9067,6 +9076,7 @@ async function saveInvoice() {
   // Koay's conditional commission (see _koayCommPctFor) — deducted from K
   // alongside retain/claude/KC-commission, same as computeAllocCore's koayDeduct.
   const _revNameForKoay = (document.getElementById('inv-reviewer')||{}).value;
+  const _koayTaxChecked = !!(document.getElementById('inv-koay-tax-comm')||{}).checked;
 
   if (jobType === 'Cosec_Retainer') {
     ceciliaFee = cecilia;
@@ -9089,7 +9099,7 @@ async function saveInvoice() {
     // claude/KC) — same base as computeAllocCore's own koayDeduct semantics —
     // so compute K once up front via a clamped subtraction matching the core.
     const _kForKoaySA = Math.max(0, gross - abotCost);
-    const _koayDeductSA = r2(_kForKoaySA * _koayCommPctFor(jobType, _revNameForKoay));
+    const _koayDeductSA = r2(_kForKoaySA * _koayCommPctFor(jobType, _revNameForKoay, _koayTaxChecked));
     const _cSA = computeAllocCore({ amt: gross, abot: abotCost, clampK: false,
       claudeOn: _claudeOn, claudePct: _claudePct, retainPct: adminPct,
       kcPct: kcPct, kcBase: _kcBaseSave, prepPct: 0.7, koayDeduct: _koayDeductSA, rnd: r2 });
@@ -9633,7 +9643,8 @@ function recalcInvLines() {
     // as the standard-formula branch in saveInvoice() (_koayCommPctFor). Cosec
     // lines are excluded (not part of the confirmed rule; they already have
     // their own 50/50 carve-out).
-    const _koayPctOvr = _isCosecOvr ? 0 : _koayCommPctFor(_lineJtOvr, lineRev);
+    const _koayTaxCheckedOvr = !!(document.getElementById('inv-koay-tax-comm')||{}).checked;
+    const _koayPctOvr = _isCosecOvr ? 0 : _koayCommPctFor(_lineJtOvr, lineRev, _koayTaxCheckedOvr);
     const _kForKoayOvr = Math.max(0, (+l.amt || 0) - lineAbot);
     const _koayDeductOvr = _koayPctOvr > 0 ? +(_kForKoayOvr * _koayPctOvr).toFixed(2) : 0;
     const _cOvr = computeAllocCore({
